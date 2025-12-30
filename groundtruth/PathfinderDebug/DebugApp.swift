@@ -372,15 +372,26 @@ class StreamReceiver: ObservableObject {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
             guard let self = self else { return }
             
+            if let error = error {
+                print("[Mac] receive error: \(error)")
+            }
+            
             if let data = data, !data.isEmpty {
+                print("[Mac] received \(data.count) bytes")
                 self.bufferLock.lock()
                 self.byteBuffer.append(contentsOf: data)
                 self.bufferLock.unlock()
                 self.processPackets()
             }
             
+            if isComplete {
+                print("[Mac] receive complete (connection closed)")
+            }
+            
             if !isComplete && error == nil {
                 self.receiveLoop(connection)
+            } else {
+                print("[Mac] stopping receive loop: isComplete=\(isComplete), error=\(String(describing: error))")
             }
         }
     }
