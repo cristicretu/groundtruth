@@ -277,12 +277,12 @@ final class NavigationEngine: ObservableObject {
             print("[Engine] processed \(frameProcessCount) frames")
         }
         
-        // extract depth points
-        let points = Depth.extractPoints(from: frame, downsample: 4)
+        // extract depth points for world model
+        let depthPoints = Depth.extractPoints(from: frame, downsample: 4)
         
         // build world model
         let newWorld = worldBuilder.update(
-            points: points,
+            points: depthPoints,
             transform: frame.camera.transform,
             timestamp: frame.timestamp
         )
@@ -290,8 +290,23 @@ final class NavigationEngine: ObservableObject {
         // update audio
         audio.update(world: newWorld)
         
+        // build occupancy grid from mesh (clean 2D representation)
+        let meshAnchors = sensors.getMeshAnchors()
+        let grid = MeshExtractor.buildOccupancyGrid(
+            from: meshAnchors,
+            userPosition: newWorld.userPosition,
+            maxDistance: 4.0
+        )
+
+        // extract point cloud for 3D visualization
+        let pointCloud = MeshExtractor.extractPointCloud(
+            from: meshAnchors,
+            userPosition: newWorld.userPosition,
+            floorY: newWorld.userPosition.y - 1.6  // assume ~1.6m phone height
+        )
+
         // send to Mac debug viewer
-        debugStream.send(frame: frame, world: newWorld)
+        debugStream.send(frame: frame, world: newWorld, grid: grid, points: pointCloud)
         
         // update UI on main thread
         let currentFps = sensors.fps

@@ -12,7 +12,7 @@ final class DebugStream {
     // streaming state
     private var isConnected = false
     private var frameCount = 0
-    private let sendEveryNFrames = 3  // ~20fps streaming, saves bandwidth
+    private let sendEveryNFrames = 6  // ~10fps streaming to reduce lag
     
     // callbacks
     var onConnected: (() -> Void)?
@@ -100,43 +100,41 @@ final class DebugStream {
     }
     
     // Send frame data to Mac
-    func send(frame: ARFrame, world: WorldModel) {
-        guard isConnected else {
-            // Only print occasionally to avoid spam
-            if frameCount % 60 == 0 {
-                print("[Stream] not connected, skipping send")
-            }
-            return
-        }
-        
-        // throttle to save bandwidth
+    func send(frame: ARFrame, world: WorldModel, grid: OccupancyGrid, points: [Point3D] = []) {
+        guard isConnected else { return }
+
+        // throttle
         frameCount += 1
         guard frameCount % sendEveryNFrames == 0 else { return }
-        
+
         // build packet
         var packet = StreamPacket()
         packet.timestamp = frame.timestamp
         packet.userPosition = [world.userPosition.x, world.userPosition.y, world.userPosition.z]
         packet.userHeading = world.userHeading
         packet.nearestObstacle = world.nearestObstacle
-        packet.obstacleCount = UInt16(world.obstacles.count)
+        packet.gridSize = grid.gridSize
+        packet.cellSize = grid.cellSize
+        packet.points = points
         
-        // encode obstacles (max 100)
-        for obstacle in world.obstacles.prefix(100) {
-            packet.obstacles.append(StreamPacket.Obstacle(
-                x: obstacle.position.x,
-                z: obstacle.position.y,
-                distance: obstacle.distance,
-                isCurb: obstacle.isCurb
-            ))
-        }
+        // Flatten grid to 1D array - encode height as Int8 (cm)
+        var flatGrid: [Int8] = []
+        flatGrid.reserveCapacity(grid.gridSize * grid.gridSize)
         
-        // compress depth map
-        if let depthData = frame.smoothedSceneDepth ?? frame.sceneDepth {
-            packet.depthData = compressDepth(depthData.depthMap)
-            packet.depthWidth = UInt16(CVPixelBufferGetWidth(depthData.depthMap))
-            packet.depthHeight = UInt16(CVPixelBufferGetHeight(depthData.depthMap))
+        let userY = world.userPosition.y
+        for z in 0..<grid.gridSize {
+            for x in 0..<grid.gridSize {
+                let cell = grid.cells[x][z]
+                if cell.isValid {
+                    // Height above floor in cm, clamped to Int8 range
+                    let heightCm = Int(cell.height * 100)
+                    flatGrid.append(Int8(clamping: min(127, max(-128, heightCm))))
+                } else {
+                    flatGrid.append(-128)  // Unknown
+                }
+            }
         }
+        packet.grid = flatGrid
         
         // serialize and send
         if let data = try? JSONEncoder().encode(packet) {
@@ -185,19 +183,15 @@ final class DebugStream {
 // Packet structure for streaming (matches Mac side)
 struct StreamPacket: Codable {
     var timestamp: Double = 0
-    var userPosition: [Float] = [0, 0, 0]  // x, y, z as array for Codable
+    var userPosition: [Float] = [0, 0, 0]
     var userHeading: Float = 0
     var nearestObstacle: Float = .infinity
-    var obstacleCount: UInt16 = 0
-    var obstacles: [Obstacle] = []
-    var depthWidth: UInt16 = 0
-    var depthHeight: UInt16 = 0
-    var depthData: Data? = nil
-    
-    struct Obstacle: Codable {
-        var x: Float
-        var z: Float
-        var distance: Float
-        var isCurb: Bool
-    }
+
+    // Occupancy grid - clean 2D top-down map
+    var gridSize: Int = 40        // 40x40 grid
+    var cellSize: Float = 0.2     // 20cm per cell
+    var grid: [Int8] = []         // flattened grid: height in cm per cell (0=floor, >15=obstacle)
+
+    // 3D point cloud for visualization
+    var points: [Point3D] = []
 }

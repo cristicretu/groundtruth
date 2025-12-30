@@ -9,8 +9,14 @@ final class Sensors: NSObject {
     // callback on every frame - called on sensor queue, not main
     var onFrame: ((ARFrame) -> Void)?
     
+    // callback for mesh updates - provides actual 3D geometry
+    var onMeshUpdate: (([ARMeshAnchor]) -> Void)?
+    
     // error callback
     var onError: ((Error) -> Void)?
+    
+    // current mesh anchors
+    private var meshAnchors: [ARMeshAnchor] = []
     
     // stats - use atomic for thread safety
     private var _fps: Int = 0
@@ -46,7 +52,15 @@ final class Sensors: NSObject {
             print("[Sensors] smoothedSceneDepth enabled")
         }
         
-        config.planeDetection = []
+        // Enable scene reconstruction for actual 3D mesh geometry!
+        if ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) {
+            config.sceneReconstruction = .mesh
+            print("[Sensors] Scene Reconstruction (mesh) ENABLED - will get real 3D geometry!")
+        } else {
+            print("[Sensors] WARNING: Scene Reconstruction not supported")
+        }
+        
+        config.planeDetection = [.horizontal, .vertical]
         
         print("[Sensors] running session...")
         session.run(config, options: [.resetTracking, .removeExistingAnchors])
@@ -62,6 +76,12 @@ final class Sensors: NSObject {
         isRunning = false
         _fps = 0
         _frameCount = 0
+        meshAnchors.removeAll()
+    }
+    
+    // Get current mesh anchors
+    func getMeshAnchors() -> [ARMeshAnchor] {
+        return meshAnchors
     }
 }
 
@@ -73,11 +93,45 @@ extension Sensors: ARSessionDelegate {
             _fps = _frameCount
             _frameCount = 0
             lastFPSTime = now
-            print("[Sensors] FPS: \(_fps), hasDepth: \(frame.sceneDepth != nil)")
+            print("[Sensors] FPS: \(_fps), hasDepth: \(frame.sceneDepth != nil), meshes: \(meshAnchors.count)")
         }
         
         // fire callback
         onFrame?(frame)
+    }
+    
+    func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
+        let newMeshes = anchors.compactMap { $0 as? ARMeshAnchor }
+        if !newMeshes.isEmpty {
+            meshAnchors.append(contentsOf: newMeshes)
+            print("[Sensors] Added \(newMeshes.count) mesh anchors, total: \(meshAnchors.count)")
+            onMeshUpdate?(meshAnchors)
+        }
+    }
+    
+    func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
+        var updated = false
+        for anchor in anchors {
+            if let meshAnchor = anchor as? ARMeshAnchor {
+                // Replace existing mesh anchor with updated one
+                if let index = meshAnchors.firstIndex(where: { $0.identifier == meshAnchor.identifier }) {
+                    meshAnchors[index] = meshAnchor
+                    updated = true
+                }
+            }
+        }
+        if updated {
+            onMeshUpdate?(meshAnchors)
+        }
+    }
+    
+    func session(_ session: ARSession, didRemove anchors: [ARAnchor]) {
+        let removedIDs = Set(anchors.compactMap { ($0 as? ARMeshAnchor)?.identifier })
+        if !removedIDs.isEmpty {
+            meshAnchors.removeAll { removedIDs.contains($0.identifier) }
+            print("[Sensors] Removed mesh anchors, remaining: \(meshAnchors.count)")
+            onMeshUpdate?(meshAnchors)
+        }
     }
     
     func session(_ session: ARSession, didFailWithError error: Error) {
