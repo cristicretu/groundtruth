@@ -1,9 +1,9 @@
 // Mesh.swift
-// Build occupancy grid from ARKit mesh - like robotics SLAM
+// Mesh extraction utilities for point cloud and mesh data
 import ARKit
 import simd
 
-// Point for streaming to Mac visualization
+// Point for streaming to Mac visualization (legacy support)
 struct Point3D: Codable {
     var x: Float  // relative to user
     var y: Float  // height relative to floor
@@ -11,102 +11,16 @@ struct Point3D: Codable {
     var c: UInt8  // category: 0=floor, 1=obstacle, 2=wall
 }
 
-// Full mesh data for detailed visualization
+// Full mesh data for detailed visualization (legacy support)
 struct MeshData: Codable {
     var vertices: [Float]   // x,y,z,x,y,z,...
     var indices: [UInt32]   // triangle indices
     var classes: [UInt8]    // per-vertex classification
 }
 
-// 2D occupancy grid - each cell knows floor height + obstacle height
-struct OccupancyGrid {
-    let cellSize: Float = 0.2  // 20cm cells
-    let gridSize: Int = 40     // 40x40 = 8m x 8m area
-    
-    // Grid data: each cell has [floorHeight, maxHeight]
-    // If maxHeight - floorHeight > threshold, it's an obstacle
-    var cells: [[Cell]]
-    var originX: Float = 0
-    var originZ: Float = 0
-    
-    struct Cell {
-        var floorHeight: Float = .infinity
-        var maxHeight: Float = -.infinity
-        var hitCount: Int = 0
-        
-        var isValid: Bool { hitCount >= 2 }
-        var height: Float { maxHeight - floorHeight }
-        var isFloor: Bool { isValid && height < 0.15 }
-        var isObstacle: Bool { isValid && height >= 0.15 }
-    }
-    
-    init() {
-        cells = Array(repeating: Array(repeating: Cell(), count: gridSize), count: gridSize)
-    }
-    
-    mutating func clear() {
-        for x in 0..<gridSize {
-            for z in 0..<gridSize {
-                cells[x][z] = Cell()
-            }
-        }
-    }
-}
-
+// Mesh extraction utilities
 struct MeshExtractor {
     
-    // Build occupancy grid from mesh anchors
-    static func buildOccupancyGrid(
-        from anchors: [ARMeshAnchor],
-        userPosition: simd_float3,
-        maxDistance: Float = 4.0
-    ) -> OccupancyGrid {
-        var grid = OccupancyGrid()
-        grid.originX = userPosition.x
-        grid.originZ = userPosition.z
-        
-        let halfGrid = Float(grid.gridSize) / 2.0
-        
-        for anchor in anchors {
-            let geometry = anchor.geometry
-            let transform = anchor.transform
-            let vertexBuffer = geometry.vertices
-            let vertexCount = vertexBuffer.count
-            let vertexStride = vertexBuffer.stride
-            
-            // Sample vertices (every 4th for speed)
-            for i in Swift.stride(from: 0, to: vertexCount, by: 4) {
-                let ptr = vertexBuffer.buffer.contents().advanced(by: i * vertexStride)
-                let localVertex = ptr.assumingMemoryBound(to: simd_float3.self).pointee
-                
-                // Transform to world
-                let world = simd_make_float3(transform * simd_float4(localVertex, 1))
-                
-                // Convert to grid coords (relative to user)
-                let relX = world.x - grid.originX
-                let relZ = world.z - grid.originZ
-                
-                // Check distance
-                let dist = sqrt(relX * relX + relZ * relZ)
-                guard dist <= maxDistance else { continue }
-                
-                // Convert to grid indices
-                let gridX = Int((relX / grid.cellSize) + halfGrid)
-                let gridZ = Int((relZ / grid.cellSize) + halfGrid)
-                
-                guard gridX >= 0 && gridX < grid.gridSize &&
-                      gridZ >= 0 && gridZ < grid.gridSize else { continue }
-                
-                // Update cell
-                grid.cells[gridX][gridZ].floorHeight = min(grid.cells[gridX][gridZ].floorHeight, world.y)
-                grid.cells[gridX][gridZ].maxHeight = max(grid.cells[gridX][gridZ].maxHeight, world.y)
-                grid.cells[gridX][gridZ].hitCount += 1
-            }
-        }
-        
-        return grid
-    }
-
     // Extract point cloud using ARKit scene classification
     static func extractPointCloud(
         from anchors: [ARMeshAnchor],
@@ -128,7 +42,7 @@ struct MeshExtractor {
             let vertexStride = geo.vertices.stride
             let classStride = classBuffer.stride
 
-            for i in Swift.stride(from: 0, to: geo.vertices.count, by: 8) {
+            for i in stride(from: 0, to: geo.vertices.count, by: 8) {
                 let classPtr = classBuffer.buffer.contents().advanced(by: i * classStride)
                 let classValue = classPtr.assumingMemoryBound(to: UInt8.self).pointee
                 let classification = ARMeshClassification(rawValue: Int(classValue)) ?? .none
@@ -198,9 +112,9 @@ struct MeshExtractor {
                     case .wall, .door, .window:
                         category = 2
                     case .ceiling:
-                        category = 3  // new: ceiling
+                        category = 3
                     case .table, .seat:
-                        category = 4  // new: furniture
+                        category = 4
                     default:
                         // fallback to height-based
                         if relY < 0.15 { category = 0 }
@@ -243,7 +157,7 @@ struct MeshExtractor {
             let vertexStride = geo.vertices.stride
             let classStride = classBuffer.stride
 
-            for i in Swift.stride(from: 0, to: geo.vertices.count, by: 16) {
+            for i in stride(from: 0, to: geo.vertices.count, by: 16) {
                 let classPtr = classBuffer.buffer.contents().advanced(by: i * classStride)
                 let classValue = classPtr.assumingMemoryBound(to: UInt8.self).pointee
                 if ARMeshClassification(rawValue: Int(classValue)) == .floor {

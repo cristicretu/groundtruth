@@ -53,6 +53,11 @@ struct PathfinderView: View {
                     statsView
                 }
                 
+                // elevation warning
+                if let warning = engine.elevationWarning {
+                    elevationWarningView(warning)
+                }
+                
                 Spacer()
                 
                 // big start/stop button
@@ -121,8 +126,8 @@ struct PathfinderView: View {
                     .font(.system(size: 20, weight: .semibold))
                     .foregroundColor(.white)
                 
-                if engine.world.nearestObstacle < .infinity {
-                    Text(String(format: "%.1fm", engine.world.nearestObstacle))
+                if engine.nearestObstacle < .infinity {
+                    Text(String(format: "%.1fm", engine.nearestObstacle))
                         .font(.system(size: 36, weight: .bold, design: .monospaced))
                         .foregroundColor(statusColor)
                 }
@@ -133,8 +138,29 @@ struct PathfinderView: View {
         .cornerRadius(16)
     }
     
+    private func elevationWarningView(_ warning: ElevationChange) -> some View {
+        HStack {
+            Image(systemName: warning.isDanger ? "exclamationmark.triangle.fill" : "arrow.up.right")
+                .foregroundColor(warning.isDanger ? .red : .yellow)
+            
+            VStack(alignment: .leading) {
+                Text(warning.shortDescription)
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundColor(warning.isDanger ? .red : .yellow)
+                
+                Text(String(format: "%.1fm ahead", warning.distance))
+                    .font(.caption)
+                    .foregroundColor(.gray)
+            }
+        }
+        .padding()
+        .background(Color.white.opacity(0.1))
+        .cornerRadius(8)
+        .padding(.horizontal)
+    }
+    
     private var statusColor: Color {
-        let dist = engine.world.nearestObstacle
+        let dist = engine.nearestObstacle
         if dist < 0.5 { return .red }
         if dist < 1.0 { return .orange }
         if dist < 2.0 { return .yellow }
@@ -142,7 +168,7 @@ struct PathfinderView: View {
     }
     
     private var statusText: String {
-        let dist = engine.world.nearestObstacle
+        let dist = engine.nearestObstacle
         if dist == .infinity { return "CLEAR" }
         if dist < 0.5 { return "STOP" }
         if dist < 1.0 { return "CLOSE" }
@@ -153,8 +179,9 @@ struct PathfinderView: View {
     private var statsView: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("FPS: \(engine.fps)")
-            Text("Obstacles: \(engine.world.obstacles.count)")
-            Text("Curbs: \(engine.world.obstacles.filter { $0.isCurb }.count)")
+            Text("Valid cells: \(engine.gridStats.valid)")
+            Text("Obstacles: \(engine.gridStats.obstacles)")
+            Text("Steps: \(engine.gridStats.steps)")
         }
         .font(.system(size: 12, design: .monospaced))
         .foregroundColor(.green)
@@ -166,22 +193,32 @@ struct PathfinderView: View {
     }
 }
 
+// Grid stats for UI
+struct GridStats {
+    var valid: Int = 0
+    var obstacles: Int = 0
+    var steps: Int = 0
+}
+
 // The navigation engine - ties everything together
-// NOT @MainActor - we handle threading manually for performance
 final class NavigationEngine: ObservableObject {
     private let sensors = Sensors()
-    private let worldBuilder = WorldBuilder()
+    private let gridBuilder = OccupancyGridBuilder(cellSize: 0.1, gridSize: 200)
     private let audio = SpatialAudio()
     private let debugStream = DebugStream()
     private let processingQueue = DispatchQueue(label: "processing", qos: .userInteractive)
     
     @Published private(set) var isRunning = false
-    @Published private(set) var world = WorldModel.empty
     @Published private(set) var fps: Int = 0
     @Published private(set) var error: String?
     @Published private(set) var isStreamConnected = false
+    @Published private(set) var nearestObstacle: Float = .infinity
+    @Published private(set) var elevationWarning: ElevationChange?
+    @Published private(set) var gridStats = GridStats()
     
     private var frameProcessCount = 0
+    private var lastUserPosition: simd_float3 = .zero
+    private var lastUserHeading: Float = 0
     
     init() {
         print("[Engine] init")
@@ -258,8 +295,10 @@ final class NavigationEngine: ObservableObject {
         
         DispatchQueue.main.async {
             self.isRunning = false
-            self.world = WorldModel.empty
             self.fps = 0
+            self.nearestObstacle = .infinity
+            self.elevationWarning = nil
+            self.gridStats = GridStats()
         }
         print("[Engine] stop() complete")
     }
@@ -273,50 +312,116 @@ final class NavigationEngine: ObservableObject {
     // Called on processing queue
     private func processFrame(_ frame: ARFrame) {
         frameProcessCount += 1
-        if frameProcessCount % 60 == 0 {
-            print("[Engine] processed \(frameProcessCount) frames")
-        }
         
-        // extract depth points for world model
-        let depthPoints = Depth.extractPoints(from: frame, downsample: 4)
-        
-        // build world model
-        let newWorld = worldBuilder.update(
-            points: depthPoints,
-            transform: frame.camera.transform,
-            timestamp: frame.timestamp
+        // Extract user pose
+        let transform = frame.camera.transform
+        let userPosition = simd_float3(
+            transform.columns.3.x,
+            transform.columns.3.y,
+            transform.columns.3.z
         )
+        let forward = simd_float3(
+            -transform.columns.2.x,
+            0,
+            -transform.columns.2.z
+        )
+        let userHeading = atan2(forward.x, forward.z)
         
-        // update audio
-        audio.update(world: newWorld)
+        lastUserPosition = userPosition
+        lastUserHeading = userHeading
         
-        // build occupancy grid from mesh (clean 2D representation)
+        // Get mesh anchors
         let meshAnchors = sensors.getMeshAnchors()
-        let grid = MeshExtractor.buildOccupancyGrid(
+        
+        // Build occupancy grid from mesh
+        var grid = gridBuilder.build(
             from: meshAnchors,
-            userPosition: newWorld.userPosition,
-            maxDistance: 4.0
+            userPosition: userPosition,
+            userHeading: userHeading,
+            maxDistance: 10.0
         )
-
-        // extract mesh for 3D visualization
-        let mesh = MeshExtractor.extractMesh(
-            from: meshAnchors,
-            userPosition: newWorld.userPosition
+        
+        // Analyze for elevation changes
+        let elevationChanges = ElevationAnalyzer.analyze(
+            grid: grid,
+            userHeading: userHeading,
+            maxDistance: 5.0
         )
+        
+        // Mark step/curb/dropoff cells based on analyzer output (keeps builder clean).
+        // This prevents false-positive coloring from noisy single-cell stats.
+        for change in elevationChanges {
+            let halfGrid = Float(grid.gridSize) / 2.0
+            let gx = Int((change.position.x - grid.originX) / grid.cellSize + halfGrid)
+            let gz = Int((change.position.y - grid.originZ) / grid.cellSize + halfGrid)
+            guard gx >= 0 && gx < grid.gridSize && gz >= 0 && gz < grid.gridSize else { continue }
 
-        // Debug: log mesh stats periodically
-        if frameProcessCount % 60 == 0 {
-            print("[App] meshAnchors: \(meshAnchors.count), verts: \(mesh.vertices.count/3), tris: \(mesh.indices.count/3)")
+            let mapped: CellState
+            switch change.type {
+            case .stepUp, .stepDown: mapped = .step
+            case .curbUp, .curbDown: mapped = .curb
+            case .rampUp, .rampDown: mapped = .ramp
+            case .stairs: mapped = .stairs
+            case .dropoff: mapped = .dropoff
+            default: mapped = .unknown
+            }
+
+            if mapped != .unknown {
+                // Only override free/unknown. Never overwrite occupied.
+                if grid.cells[gx][gz].state != .occupied {
+                    grid.cells[gx][gz].state = mapped
+                }
+            }
         }
 
-        // send to Mac debug viewer
-        debugStream.send(frame: frame, world: newWorld, grid: grid, mesh: mesh)
+        // Get most urgent warning
+        let urgent = ElevationAnalyzer.getMostUrgent(
+            elevationChanges,
+            userHeading: userHeading
+        )
         
-        // update UI on main thread
+        // Calculate nearest obstacle
+        let nearest = grid.nearestObstacle(
+            fromX: userPosition.x,
+            fromZ: userPosition.z,
+            heading: userHeading
+        )
+        
+        // Update audio feedback
+        audio.update(
+            nearestObstacle: nearest,
+            userHeading: userHeading,
+            elevationWarning: urgent
+        )
+        
+        // Send to Mac debug viewer
+        debugStream.send(
+            timestamp: frame.timestamp,
+            userPosition: userPosition,
+            userHeading: userHeading,
+            grid: grid,
+            elevationChanges: elevationChanges,
+            nearestObstacle: nearest
+        )
+        
+        // Debug log periodically
+        if frameProcessCount % 60 == 0 {
+            print("[Engine] frame \(frameProcessCount): valid=\(grid.validCellCount) obs=\(grid.obstacleCellCount) steps=\(grid.stepCellCount) nearest=\(String(format: "%.2f", nearest))m")
+        }
+        
+        // Update UI on main thread
         let currentFps = sensors.fps
+        let stats = GridStats(
+            valid: grid.validCellCount,
+            obstacles: grid.obstacleCellCount,
+            steps: grid.stepCellCount
+        )
+        
         DispatchQueue.main.async {
-            self.world = newWorld
             self.fps = currentFps
+            self.nearestObstacle = nearest
+            self.elevationWarning = urgent
+            self.gridStats = stats
         }
     }
 }

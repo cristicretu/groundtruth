@@ -10,7 +10,9 @@ final class SpatialAudio {
     // obstacle beep (triggered)
     private var beepPlayer: AVAudioPlayerNode?
     private var beepBuffer: AVAudioPCMBuffer?
-    private var curbBuffer: AVAudioPCMBuffer?  // different sound for curbs
+    private var stepBuffer: AVAudioPCMBuffer?    // step warning
+    private var curbBuffer: AVAudioPCMBuffer?    // curb warning
+    private var dangerBuffer: AVAudioPCMBuffer?  // danger warning
     
     // format for buffers (must match player connection)
     private var bufferFormat: AVAudioFormat?
@@ -18,7 +20,9 @@ final class SpatialAudio {
     // state
     private var isRunning = false
     private var lastBeepTime: Double = 0
+    private var lastElevationTime: Double = 0
     private let minBeepInterval: Double = 0.15
+    private let minElevationInterval: Double = 0.5  // elevation warnings less frequent
     
     init() {
         setupAudioSession()
@@ -70,8 +74,14 @@ final class SpatialAudio {
         // beep - 1200Hz short burst for obstacles
         beepBuffer = generateSineBuffer(frequency: 1200, duration: 0.08, format: format)
         
-        // curb sound - lower pitch, longer
-        curbBuffer = generateSineBuffer(frequency: 600, duration: 0.15, format: format)
+        // step sound - rising tone (indicates step up/down)
+        stepBuffer = generateChirpBuffer(startFreq: 600, endFreq: 900, duration: 0.15, format: format)
+        
+        // curb sound - lower, longer (more warning)
+        curbBuffer = generateSineBuffer(frequency: 400, duration: 0.25, format: format)
+        
+        // danger sound - rapid low beeps
+        dangerBuffer = generateDangerBuffer(frequency: 300, duration: 0.4, format: format)
         
         print("[Audio] tones generated")
     }
@@ -104,6 +114,65 @@ final class SpatialAudio {
         return buffer
     }
     
+    // Chirp - frequency sweep for step indication
+    private func generateChirpBuffer(
+        startFreq: Double,
+        endFreq: Double,
+        duration: Double,
+        format: AVAudioFormat
+    ) -> AVAudioPCMBuffer? {
+        let sampleRate = format.sampleRate
+        let frameCount = AVAudioFrameCount(duration * sampleRate)
+        
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else {
+            return nil
+        }
+        
+        buffer.frameLength = frameCount
+        guard let data = buffer.floatChannelData?[0] else { return nil }
+        
+        for i in 0..<Int(frameCount) {
+            let t = Double(i) / sampleRate
+            let progress = t / duration
+            let frequency = startFreq + (endFreq - startFreq) * progress
+            
+            let fadeIn = min(t / 0.005, 1.0)
+            let fadeOut = min((duration - t) / 0.01, 1.0)
+            let envelope = fadeIn * fadeOut
+            
+            data[i] = Float(sin(2.0 * .pi * frequency * t) * envelope * 0.5)
+        }
+        
+        return buffer
+    }
+    
+    // Danger - rapid pulses
+    private func generateDangerBuffer(
+        frequency: Double,
+        duration: Double,
+        format: AVAudioFormat
+    ) -> AVAudioPCMBuffer? {
+        let sampleRate = format.sampleRate
+        let frameCount = AVAudioFrameCount(duration * sampleRate)
+        
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else {
+            return nil
+        }
+        
+        buffer.frameLength = frameCount
+        guard let data = buffer.floatChannelData?[0] else { return nil }
+        
+        let pulseRate = 8.0 // 8 pulses per second
+        
+        for i in 0..<Int(frameCount) {
+            let t = Double(i) / sampleRate
+            let pulse = sin(2.0 * .pi * pulseRate * t) > 0 ? 1.0 : 0.0
+            data[i] = Float(sin(2.0 * .pi * frequency * t) * pulse * 0.7)
+        }
+        
+        return buffer
+    }
+    
     func start() {
         guard !isRunning else { return }
         do {
@@ -122,57 +191,94 @@ final class SpatialAudio {
         print("[Audio] engine stopped")
     }
     
-    // Update based on world state - called from processing queue
-    func update(world: WorldModel) {
+    // New interface - called from processing queue
+    func update(
+        nearestObstacle: Float,
+        userHeading: Float,
+        elevationWarning: ElevationChange?
+    ) {
         guard isRunning else { return }
-        guard world.nearestObstacle < 5.0 else { return }  // only beep if something within 5m
         
         let now = CACurrentMediaTime()
         
-        // find nearest obstacle for positioning
-        guard let nearest = world.obstacles.min(by: { $0.distance < $1.distance }) else { return }
+        // Handle elevation warnings (higher priority)
+        if let warning = elevationWarning, warning.distance < 3.0 {
+            if now - lastElevationTime >= minElevationInterval {
+                lastElevationTime = now
+                playElevationWarning(warning)
+                return  // Don't play obstacle beep if we just played elevation warning
+            }
+        }
         
-        let dist = nearest.distance
+        // Handle obstacle beeps
+        guard nearestObstacle < 5.0 else { return }
         
         // beep rate based on distance (closer = faster)
         let interval: Double
-        if dist < 0.5 {
+        if nearestObstacle < 0.5 {
             interval = 0.12  // very fast - danger!
-        } else if dist < 1.0 {
+        } else if nearestObstacle < 1.0 {
             interval = 0.2
-        } else if dist < 2.0 {
+        } else if nearestObstacle < 2.0 {
             interval = 0.35
-        } else if dist < 3.0 {
+        } else if nearestObstacle < 3.0 {
             interval = 0.5
         } else {
             interval = 0.8
         }
         
-        // play beep if enough time has passed
         guard now - lastBeepTime >= interval else { return }
         lastBeepTime = now
         
-        // position sound in 3D space
-        // angle: 0 = ahead, positive = right, negative = left
-        let x = sin(nearest.angle) * 2.0
-        let z = -cos(nearest.angle) * 2.0  // negative z = in front
-        
-        beepPlayer?.position = AVAudio3DPoint(x: Float(x), y: 0, z: Float(z))
+        // Position sound ahead (obstacle is in front)
+        beepPlayer?.position = AVAudio3DPoint(x: 0, y: 0, z: -2)  // in front
         
         // volume based on distance (closer = louder)
-        let volume = max(0.2, min(1.0, 1.5 / dist))
+        let volume = max(0.2, min(1.0, 1.5 / nearestObstacle))
         beepPlayer?.volume = volume
         
-        // play appropriate sound
-        playBeep(isCurb: nearest.isCurb)
+        playBeep()
     }
     
-    private func playBeep(isCurb: Bool) {
+    private func playElevationWarning(_ warning: ElevationChange) {
         guard let player = beepPlayer else { return }
-        let buffer = isCurb ? curbBuffer : beepBuffer
+        
+        // Position sound based on warning angle
+        let x = sin(warning.angle) * 2.0
+        let z = -cos(warning.angle) * 2.0  // negative z = in front
+        player.position = AVAudio3DPoint(x: Float(x), y: 0, z: Float(z))
+        
+        // volume based on distance
+        let volume = max(0.3, min(1.0, 2.0 / warning.distance))
+        player.volume = volume
+        
+        // Select appropriate buffer
+        let buffer: AVAudioPCMBuffer?
+        switch warning.type {
+        case .stepUp, .stepDown:
+            buffer = stepBuffer
+        case .curbUp, .curbDown:
+            buffer = curbBuffer
+        case .dropoff:
+            buffer = dangerBuffer
+        case .stairs:
+            buffer = stepBuffer
+        default:
+            buffer = beepBuffer
+        }
+        
         guard let buf = buffer else { return }
         
-        // schedule and play on main thread to avoid threading issues
+        DispatchQueue.main.async {
+            player.stop()
+            player.scheduleBuffer(buf, at: nil, options: [], completionHandler: nil)
+            player.play()
+        }
+    }
+    
+    private func playBeep() {
+        guard let player = beepPlayer, let buf = beepBuffer else { return }
+        
         DispatchQueue.main.async {
             player.stop()
             player.scheduleBuffer(buf, at: nil, options: [], completionHandler: nil)

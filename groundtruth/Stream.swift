@@ -1,5 +1,5 @@
 // Stream.swift
-// Debug streaming to Mac - send depth + world model over local network
+// Debug streaming to Mac - send occupancy grid + elevation data
 import Foundation
 import Network
 import ARKit
@@ -12,7 +12,7 @@ final class DebugStream {
     // streaming state
     private var isConnected = false
     private var frameCount = 0
-    private let sendEveryNFrames = 6  // ~10fps streaming to reduce lag
+    private let sendEveryNFrames = 3  // ~20fps streaming
     
     // callbacks
     var onConnected: (() -> Void)?
@@ -99,42 +99,69 @@ final class DebugStream {
         isConnected = false
     }
     
-    // Send frame data to Mac
-    func send(frame: ARFrame, world: WorldModel, grid: OccupancyGrid, mesh: MeshData? = nil) {
+    // Send frame data to Mac - new occupancy grid format
+    func send(
+        timestamp: Double,
+        userPosition: simd_float3,
+        userHeading: Float,
+        grid: OccupancyGrid,
+        elevationChanges: [ElevationChange] = [],
+        nearestObstacle: Float = .infinity
+    ) {
         guard isConnected else { return }
-
+        
         // throttle
         frameCount += 1
         guard frameCount % sendEveryNFrames == 0 else { return }
-
+        
         // build packet
         var packet = StreamPacket()
-        packet.timestamp = frame.timestamp
-        packet.userPosition = [world.userPosition.x, world.userPosition.y, world.userPosition.z]
-        packet.userHeading = world.userHeading
-        packet.nearestObstacle = world.nearestObstacle
+        packet.timestamp = timestamp
+        packet.userPosition = [userPosition.x, userPosition.y, userPosition.z]
+        packet.userHeading = userHeading
+        packet.nearestObstacle = nearestObstacle
+        packet.floorHeight = grid.floorHeight
+        
+        // Grid metadata
         packet.gridSize = grid.gridSize
         packet.cellSize = grid.cellSize
-        packet.mesh = mesh
         
-        // Flatten grid to 1D array - encode height as Int8 (cm)
-        var flatGrid: [Int8] = []
-        flatGrid.reserveCapacity(grid.gridSize * grid.gridSize)
+        // Flatten grid - state and elevation for each cell
+        var states: [UInt8] = []
+        var elevations: [Int8] = []
+        states.reserveCapacity(grid.gridSize * grid.gridSize)
+        elevations.reserveCapacity(grid.gridSize * grid.gridSize)
         
-        let userY = world.userPosition.y
         for z in 0..<grid.gridSize {
             for x in 0..<grid.gridSize {
                 let cell = grid.cells[x][z]
-                if cell.isValid {
-                    // Height above floor in cm, clamped to Int8 range
-                    let heightCm = Int(cell.height * 100)
-                    flatGrid.append(Int8(clamping: min(127, max(-128, heightCm))))
-                } else {
-                    flatGrid.append(-128)  // Unknown
-                }
+                states.append(cell.state.rawValue)
+                
+                // Elevation as cm, clamped to Int8 range
+                let elevCm = Int(cell.elevation * 100)
+                elevations.append(Int8(clamping: max(-128, min(127, elevCm))))
             }
         }
-        packet.grid = flatGrid
+        
+        packet.cellStates = states
+        packet.cellElevations = elevations
+        
+        // Stats
+        packet.validCells = grid.validCellCount
+        packet.obstacleCells = grid.obstacleCellCount
+        packet.stepCells = grid.stepCellCount
+        
+        // Elevation changes (most important ones)
+        packet.elevationChanges = Array(elevationChanges.prefix(10)).map { change in
+            StreamElevationChange(
+                type: change.type.rawValue,
+                posX: change.position.x,
+                posZ: change.position.y,
+                distance: change.distance,
+                angle: change.angle,
+                heightChange: change.heightChange
+            )
+        }
         
         // serialize and send
         if let data = try? JSONEncoder().encode(packet) {
@@ -143,8 +170,8 @@ final class DebugStream {
             let lengthData = Data(bytes: &length, count: 4)
             
             let packetNum = frameCount / sendEveryNFrames
-            if packetNum % 20 == 0 {
-                print("[Stream] sending packet #\(packetNum), size: \(data.count) bytes")
+            if packetNum % 30 == 0 {
+                print("[Stream] packet #\(packetNum): \(data.count) bytes, valid:\(grid.validCellCount) obs:\(grid.obstacleCellCount) step:\(grid.stepCellCount)")
             }
             
             connection?.send(content: lengthData + data, completion: .contentProcessed { [weak self] error in
@@ -157,27 +184,16 @@ final class DebugStream {
             print("[Stream] failed to encode packet")
         }
     }
-    
-    private func compressDepth(_ buffer: CVPixelBuffer) -> Data? {
-        CVPixelBufferLockBaseAddress(buffer, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
-        
-        let width = CVPixelBufferGetWidth(buffer)
-        let height = CVPixelBufferGetHeight(buffer)
-        let ptr = CVPixelBufferGetBaseAddress(buffer)!
-        
-        // Send full resolution - depth maps are typically 256x192, small enough
-        let srcPtr = ptr.assumingMemoryBound(to: Float32.self)
-        let count = width * height
-        
-        // Copy to array
-        var depthValues = [Float32](repeating: 0, count: count)
-        for i in 0..<count {
-            depthValues[i] = srcPtr[i]
-        }
-        
-        return depthValues.withUnsafeBytes { Data($0) }
-    }
+}
+
+// Elevation change for streaming
+struct StreamElevationChange: Codable {
+    var type: UInt8
+    var posX: Float
+    var posZ: Float
+    var distance: Float
+    var angle: Float
+    var heightChange: Float
 }
 
 // Packet structure for streaming (matches Mac side)
@@ -186,15 +202,21 @@ struct StreamPacket: Codable {
     var userPosition: [Float] = [0, 0, 0]
     var userHeading: Float = 0
     var nearestObstacle: Float = .infinity
-
-    // Occupancy grid - clean 2D top-down map
-    var gridSize: Int = 40        // 40x40 grid
-    var cellSize: Float = 0.2     // 20cm per cell
-    var grid: [Int8] = []         // flattened grid: height in cm per cell (0=floor, >15=obstacle)
-
-    // 3D point cloud for visualization
-    var points: [Point3D] = []
-
-    // Full mesh for detailed viz
-    var mesh: MeshData?
+    var floorHeight: Float = 0
+    
+    // Grid metadata
+    var gridSize: Int = 200
+    var cellSize: Float = 0.1
+    
+    // Grid data (flattened)
+    var cellStates: [UInt8] = []      // CellState raw values
+    var cellElevations: [Int8] = []   // Elevation in cm
+    
+    // Stats
+    var validCells: Int = 0
+    var obstacleCells: Int = 0
+    var stepCells: Int = 0
+    
+    // Detected elevation changes
+    var elevationChanges: [StreamElevationChange] = []
 }
