@@ -8,16 +8,14 @@ final class Sensors: NSObject {
     
     // callback on every frame - called on sensor queue, not main
     var onFrame: ((ARFrame) -> Void)?
-    
-    // callback for mesh updates - provides actual 3D geometry
-    var onMeshUpdate: (([ARMeshAnchor]) -> Void)?
-    
+
     // error callback
     var onError: ((Error) -> Void)?
     
-    // current mesh anchors
+    // current mesh anchors - protected by lock for thread safety
     private var meshAnchors: [ARMeshAnchor] = []
-    
+    private let meshLock = NSLock()
+
     // stats - use atomic for thread safety
     private var _fps: Int = 0
     private var _frameCount: Int = 0
@@ -52,10 +50,13 @@ final class Sensors: NSObject {
             print("[Sensors] smoothedSceneDepth enabled")
         }
         
-        // Enable scene reconstruction for actual 3D mesh geometry!
-        if ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) {
+        // Enable scene reconstruction with classification
+        if ARWorldTrackingConfiguration.supportsSceneReconstruction(.meshWithClassification) {
+            config.sceneReconstruction = .meshWithClassification
+            print("[Sensors] Scene Reconstruction WITH CLASSIFICATION enabled")
+        } else if ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) {
             config.sceneReconstruction = .mesh
-            print("[Sensors] Scene Reconstruction (mesh) ENABLED - will get real 3D geometry!")
+            print("[Sensors] Scene Reconstruction (mesh only, no classification)")
         } else {
             print("[Sensors] WARNING: Scene Reconstruction not supported")
         }
@@ -76,12 +77,17 @@ final class Sensors: NSObject {
         isRunning = false
         _fps = 0
         _frameCount = 0
+        meshLock.lock()
         meshAnchors.removeAll()
+        meshLock.unlock()
     }
-    
-    // Get current mesh anchors
+
+    // Get current mesh anchors - thread safe copy
     func getMeshAnchors() -> [ARMeshAnchor] {
-        return meshAnchors
+        meshLock.lock()
+        let copy = meshAnchors
+        meshLock.unlock()
+        return copy
     }
 }
 
@@ -103,35 +109,36 @@ extension Sensors: ARSessionDelegate {
     func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
         let newMeshes = anchors.compactMap { $0 as? ARMeshAnchor }
         if !newMeshes.isEmpty {
+            meshLock.lock()
             meshAnchors.append(contentsOf: newMeshes)
-            print("[Sensors] Added \(newMeshes.count) mesh anchors, total: \(meshAnchors.count)")
-            onMeshUpdate?(meshAnchors)
+            let total = meshAnchors.count
+            meshLock.unlock()
+            print("[Sensors] Added \(newMeshes.count) mesh anchors, total: \(total)")
         }
     }
-    
+
     func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
-        var updated = false
-        for anchor in anchors {
-            if let meshAnchor = anchor as? ARMeshAnchor {
-                // Replace existing mesh anchor with updated one
-                if let index = meshAnchors.firstIndex(where: { $0.identifier == meshAnchor.identifier }) {
-                    meshAnchors[index] = meshAnchor
-                    updated = true
-                }
+        let updatedMeshes = anchors.compactMap { $0 as? ARMeshAnchor }
+        guard !updatedMeshes.isEmpty else { return }
+
+        meshLock.lock()
+        for meshAnchor in updatedMeshes {
+            if let index = meshAnchors.firstIndex(where: { $0.identifier == meshAnchor.identifier }) {
+                meshAnchors[index] = meshAnchor
             }
         }
-        if updated {
-            onMeshUpdate?(meshAnchors)
-        }
+        meshLock.unlock()
     }
-    
+
     func session(_ session: ARSession, didRemove anchors: [ARAnchor]) {
         let removedIDs = Set(anchors.compactMap { ($0 as? ARMeshAnchor)?.identifier })
-        if !removedIDs.isEmpty {
-            meshAnchors.removeAll { removedIDs.contains($0.identifier) }
-            print("[Sensors] Removed mesh anchors, remaining: \(meshAnchors.count)")
-            onMeshUpdate?(meshAnchors)
-        }
+        guard !removedIDs.isEmpty else { return }
+
+        meshLock.lock()
+        meshAnchors.removeAll { removedIDs.contains($0.identifier) }
+        let remaining = meshAnchors.count
+        meshLock.unlock()
+        print("[Sensors] Removed mesh anchors, remaining: \(remaining)")
     }
     
     func session(_ session: ARSession, didFailWithError error: Error) {

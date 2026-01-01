@@ -15,7 +15,7 @@ struct PathfinderApp: App {
 
 struct PathfinderView: View {
     @StateObject private var engine = NavigationEngine()
-    @State private var debugIP = ""
+    @State private var debugIP = "192.168.1.102"
     @State private var showDebugSettings = false
     
     var body: some View {
@@ -298,15 +298,19 @@ final class NavigationEngine: ObservableObject {
             maxDistance: 4.0
         )
 
-        // extract point cloud for 3D visualization
-        let pointCloud = MeshExtractor.extractPointCloud(
+        // extract mesh for 3D visualization
+        let mesh = MeshExtractor.extractMesh(
             from: meshAnchors,
-            userPosition: newWorld.userPosition,
-            floorY: newWorld.userPosition.y - 1.6  // assume ~1.6m phone height
+            userPosition: newWorld.userPosition
         )
 
+        // Debug: log mesh stats periodically
+        if frameProcessCount % 60 == 0 {
+            print("[App] meshAnchors: \(meshAnchors.count), verts: \(mesh.vertices.count/3), tris: \(mesh.indices.count/3)")
+        }
+
         // send to Mac debug viewer
-        debugStream.send(frame: frame, world: newWorld, grid: grid, points: pointCloud)
+        debugStream.send(frame: frame, world: newWorld, grid: grid, mesh: mesh)
         
         // update UI on main thread
         let currentFps = sensors.fps

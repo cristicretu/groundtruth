@@ -100,7 +100,7 @@ final class DebugStream {
     }
     
     // Send frame data to Mac
-    func send(frame: ARFrame, world: WorldModel, grid: OccupancyGrid, points: [Point3D] = []) {
+    func send(frame: ARFrame, world: WorldModel, grid: OccupancyGrid, mesh: MeshData? = nil) {
         guard isConnected else { return }
 
         // throttle
@@ -115,7 +115,7 @@ final class DebugStream {
         packet.nearestObstacle = world.nearestObstacle
         packet.gridSize = grid.gridSize
         packet.cellSize = grid.cellSize
-        packet.points = points
+        packet.mesh = mesh
         
         // Flatten grid to 1D array - encode height as Int8 (cm)
         var flatGrid: [Int8] = []
@@ -194,4 +194,7 @@ struct StreamPacket: Codable {
 
     // 3D point cloud for visualization
     var points: [Point3D] = []
+
+    // Full mesh for detailed viz
+    var mesh: MeshData?
 }
