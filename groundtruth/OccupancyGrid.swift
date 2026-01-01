@@ -110,9 +110,13 @@ struct OccupancyGrid: Codable {
         let halfGrid = Float(gridSize) / 2.0
         let relX = worldX - originX
         let relZ = worldZ - originZ
+
+        // Stabilize BEV: rotate world into user-forward frame.
+        // After this, +Z is \"forward\" (heading-aligned), +X is \"right\".
+        let (rx, rz) = rotate2D(x: relX, z: relZ, by: -userHeading)
         
-        let gridX = Int((relX / cellSize) + halfGrid)
-        let gridZ = Int((relZ / cellSize) + halfGrid)
+        let gridX = Int((rx / cellSize) + halfGrid)
+        let gridZ = Int((rz / cellSize) + halfGrid)
         
         guard gridX >= 0 && gridX < gridSize &&
               gridZ >= 0 && gridZ < gridSize else {
@@ -125,9 +129,12 @@ struct OccupancyGrid: Codable {
     // Convert grid indices to world position (center of cell)
     func gridToWorld(_ gridX: Int, _ gridZ: Int) -> (x: Float, z: Float) {
         let halfGrid = Float(gridSize) / 2.0
-        let worldX = (Float(gridX) - halfGrid + 0.5) * cellSize + originX
-        let worldZ = (Float(gridZ) - halfGrid + 0.5) * cellSize + originZ
-        return (worldX, worldZ)
+        let localX = (Float(gridX) - halfGrid + 0.5) * cellSize
+        let localZ = (Float(gridZ) - halfGrid + 0.5) * cellSize
+
+        // Inverse of worldToGrid rotation: rotate user-frame back to world.
+        let (wx, wz) = rotate2D(x: localX, z: localZ, by: userHeading)
+        return (wx + originX, wz + originZ)
     }
     
     // Get cell at world position
@@ -176,6 +183,16 @@ struct OccupancyGrid: Codable {
         
         return .infinity
     }
+}
+
+// MARK: - Math
+
+@inline(__always)
+private func rotate2D(x: Float, z: Float, by angle: Float) -> (Float, Float) {
+    let c = cos(angle)
+    let s = sin(angle)
+    // Standard 2D rotation in XZ plane
+    return (x * c - z * s, x * s + z * c)
 }
 
 // Builder - constructs occupancy grid from ARKit mesh

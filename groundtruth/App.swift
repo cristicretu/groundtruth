@@ -182,6 +182,10 @@ struct PathfinderView: View {
             Text("Valid cells: \(engine.gridStats.valid)")
             Text("Obstacles: \(engine.gridStats.obstacles)")
             Text("Steps: \(engine.gridStats.steps)")
+            Divider().overlay(Color.gray.opacity(0.4))
+            Text(String(format: "Yaw: %.0f°", engine.orientationDebug.yawDeg))
+            Text(String(format: "Pitch: %.0f° (%@)", engine.orientationDebug.pitchDeg, engine.orientationDebug.pitchStatus))
+            Text(String(format: "Roll: %.0f°", engine.orientationDebug.rollDeg))
         }
         .font(.system(size: 12, design: .monospaced))
         .foregroundColor(.green)
@@ -215,10 +219,13 @@ final class NavigationEngine: ObservableObject {
     @Published private(set) var nearestObstacle: Float = .infinity
     @Published private(set) var elevationWarning: ElevationChange?
     @Published private(set) var gridStats = GridStats()
+    @Published private(set) var orientationDebug = OrientationDebug()
     
     private var frameProcessCount = 0
     private var lastUserPosition: simd_float3 = .zero
     private var lastUserHeading: Float = 0
+    private var smoothHeading: Float = 0
+    private var isHeadingInitialized = false
     
     init() {
         print("[Engine] init")
@@ -325,10 +332,26 @@ final class NavigationEngine: ObservableObject {
             0,
             -transform.columns.2.z
         )
-        let userHeading = atan2(forward.x, forward.z)
+        let rawHeading = atan2(forward.x, forward.z)
+
+        // Smooth heading for BEV stability (reduces jitter from ARKit pose noise).
+        if !isHeadingInitialized {
+            smoothHeading = rawHeading
+            isHeadingInitialized = true
+        } else {
+            smoothHeading = smoothAngle(current: smoothHeading, target: rawHeading, alpha: 0.2)
+        }
         
         lastUserPosition = userPosition
-        lastUserHeading = userHeading
+        lastUserHeading = smoothHeading
+
+        // Orientation debug (pitch/roll/yaw in degrees) for chest-mount setup.
+        let (yaw, pitch, roll) = eulerYPR(from: transform)
+        let debug = OrientationDebug(
+            yawDeg: yaw * 180 / .pi,
+            pitchDeg: pitch * 180 / .pi,
+            rollDeg: roll * 180 / .pi
+        )
         
         // Get mesh anchors
         let meshAnchors = sensors.getMeshAnchors()
@@ -337,24 +360,21 @@ final class NavigationEngine: ObservableObject {
         var grid = gridBuilder.build(
             from: meshAnchors,
             userPosition: userPosition,
-            userHeading: userHeading,
+            userHeading: smoothHeading,
             maxDistance: 10.0
         )
         
         // Analyze for elevation changes
         let elevationChanges = ElevationAnalyzer.analyze(
             grid: grid,
-            userHeading: userHeading,
+            userHeading: smoothHeading,
             maxDistance: 5.0
         )
         
         // Mark step/curb/dropoff cells based on analyzer output (keeps builder clean).
         // This prevents false-positive coloring from noisy single-cell stats.
         for change in elevationChanges {
-            let halfGrid = Float(grid.gridSize) / 2.0
-            let gx = Int((change.position.x - grid.originX) / grid.cellSize + halfGrid)
-            let gz = Int((change.position.y - grid.originZ) / grid.cellSize + halfGrid)
-            guard gx >= 0 && gx < grid.gridSize && gz >= 0 && gz < grid.gridSize else { continue }
+            guard let (gx, gz) = grid.worldToGrid(change.position.x, change.position.y) else { continue }
 
             let mapped: CellState
             switch change.type {
@@ -377,20 +397,20 @@ final class NavigationEngine: ObservableObject {
         // Get most urgent warning
         let urgent = ElevationAnalyzer.getMostUrgent(
             elevationChanges,
-            userHeading: userHeading
+            userHeading: smoothHeading
         )
         
         // Calculate nearest obstacle
         let nearest = grid.nearestObstacle(
             fromX: userPosition.x,
             fromZ: userPosition.z,
-            heading: userHeading
+            heading: smoothHeading
         )
         
         // Update audio feedback
         audio.update(
             nearestObstacle: nearest,
-            userHeading: userHeading,
+            userHeading: smoothHeading,
             elevationWarning: urgent
         )
         
@@ -398,7 +418,7 @@ final class NavigationEngine: ObservableObject {
         debugStream.send(
             timestamp: frame.timestamp,
             userPosition: userPosition,
-            userHeading: userHeading,
+            userHeading: smoothHeading,
             grid: grid,
             elevationChanges: elevationChanges,
             nearestObstacle: nearest
@@ -422,6 +442,55 @@ final class NavigationEngine: ObservableObject {
             self.nearestObstacle = nearest
             self.elevationWarning = urgent
             self.gridStats = stats
+            self.orientationDebug = debug
         }
     }
+}
+
+// MARK: - Orientation debug
+
+struct OrientationDebug {
+    var yawDeg: Float = 0
+    var pitchDeg: Float = 0
+    var rollDeg: Float = 0
+
+    var pitchStatus: String {
+        // For chest mount: we want slight downward tilt (10-20°).
+        if pitchDeg < -25 { return "TOO DOWN" }
+        if pitchDeg < -8 { return "OK" }
+        if pitchDeg < 5 { return "TOO LEVEL" }
+        return "TOO UP"
+    }
+}
+
+private func eulerYPR(from m: simd_float4x4) -> (yaw: Float, pitch: Float, roll: Float) {
+    // Extract yaw/pitch/roll from rotation matrix.
+    // ARKit: right-handed, y-up. This gives a stable approximation for UI/debug.
+    let r00 = m.columns.0.x, r01 = m.columns.1.x, r02 = m.columns.2.x
+    let r10 = m.columns.0.y, r11 = m.columns.1.y, r12 = m.columns.2.y
+    let r20 = m.columns.0.z, r21 = m.columns.1.z, r22 = m.columns.2.z
+
+    // Yaw around Y, Pitch around X, Roll around Z (one common convention).
+    // Guard against numerical issues.
+    let pitch = asin(clamp(-r12, -1, 1))
+    let yaw = atan2(r02, r22)
+    let roll = atan2(r10, r11)
+    return (yaw, pitch, roll)
+}
+
+@inline(__always)
+private func clamp(_ v: Float, _ lo: Float, _ hi: Float) -> Float { min(hi, max(lo, v)) }
+
+@inline(__always)
+private func normalizeAngle(_ a: Float) -> Float {
+    var x = a
+    while x > .pi { x -= 2 * .pi }
+    while x < -.pi { x += 2 * .pi }
+    return x
+}
+
+private func smoothAngle(current: Float, target: Float, alpha: Float) -> Float {
+    // Smooth on the shortest arc.
+    let delta = normalizeAngle(target - current)
+    return normalizeAngle(current + delta * alpha)
 }

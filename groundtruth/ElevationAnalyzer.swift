@@ -20,7 +20,7 @@ enum ElevationChangeType: UInt8, Codable {
 // Detected elevation change
 struct ElevationChange: Codable {
     let type: ElevationChangeType
-    let position: SIMD2<Float>      // World XZ position
+    let position: SIMD2<Float>      // World XZ position (for rendering/streaming)
     let distance: Float             // Distance from user
     let angle: Float                // Angle relative to user heading
     let heightChange: Float         // Meters (positive = up, negative = down)
@@ -154,8 +154,9 @@ final class ElevationAnalyzer {
         let dx = Float(x - centerX) * grid.cellSize
         let dz = Float(z - centerZ) * grid.cellSize
         let distance = sqrt(dx * dx + dz * dz)
-        let worldAngle = atan2(dx, dz)
-        let relAngle = normalizeAngle(worldAngle - userHeading)
+        // Grid is already aligned to user-forward (OccupancyGrid.worldToGrid rotates by -userHeading),
+        // so the angle is already relative to the user.
+        let relAngle = normalizeAngle(atan2(dx, dz))
         
         // Confidence based on cell validity
         let confidence = min(1.0, Float(cell.hitCount) / 20.0)

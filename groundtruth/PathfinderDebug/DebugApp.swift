@@ -157,7 +157,9 @@ struct BirdEyeView: View {
         
         // User heading arrow
         let arrowLength: CGFloat = 25
-        let heading = CGFloat(packet.userHeading)
+        // Grid is already stabilized into user-forward frame (rotated on iPhone),
+        // so we keep the arrow fixed pointing \"up\".
+        let heading: CGFloat = 0
         
         // Arrow points "up" (negative Z) when heading is 0
         // In our display, up = negative Y
