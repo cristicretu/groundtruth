@@ -14,11 +14,8 @@ final class SceneAnalyzer {
         131, 136, 140, 144, 145, 147, 149, 152, 154, 161
     ]
 
-    /// Fraction of image height from bottom considered ground region for traversability.
-    var groundRegionFraction: Float = 0.6
-
-    /// Fraction of image height from bottom used for discontinuity detection.
-    var discontinuityRegionFraction: Float = 0.4
+    /// Raw depth value above which a pixel is considered sky/background and ignored.
+    var skyDepthThreshold: Float = 0.95
 
     /// Minimum normalized gradient magnitude (0-1) to count as discontinuity.
     var discontinuityThreshold: Float = 0.08
@@ -46,18 +43,16 @@ final class SceneAnalyzer {
         var traversability = [Float](repeating: 0, count: cols)
         var obstacleDistance = [Float](repeating: Float.infinity, count: cols)
 
-        let segGroundStartRow = Int(Float(segHeight) * (1.0 - groundRegionFraction))
-
         for col in 0..<cols {
             let segXStart = col * segWidth / cols
             let segXEnd = (col + 1) * segWidth / cols
             guard segXEnd > segXStart else { continue }
 
-            // Traversability: bottom groundRegionFraction of seg image
+            // Traversability: scan ALL rows, any walkable pixel counts
             var walkableCount = 0
             var totalCount = 0
 
-            for row in segGroundStartRow..<segHeight {
+            for row in 0..<segHeight {
                 for x in segXStart..<segXEnd {
                     totalCount += 1
                     if walkableIDs.contains(segLabels[row * segWidth + x]) {
@@ -68,33 +63,33 @@ final class SceneAnalyzer {
 
             traversability[col] = totalCount > 0 ? Float(walkableCount) / Float(totalCount) : 0
 
-            // Obstacle distance: scan depth column bottom to top, find first non-walkable
+            // Obstacle distance: scan bottom to top, find first non-walkable non-sky pixel
             let depthXStart = col * depthWidth / cols
             let depthXEnd = (col + 1) * depthWidth / cols
             let depthXMid = (depthXStart + depthXEnd) / 2
             guard depthXMid < depthWidth else { continue }
 
-            let depthGroundStartRow = Int(Float(depthHeight) * (1.0 - groundRegionFraction))
+            for row in stride(from: depthHeight - 1, through: 0, by: -1) {
+                let depthVal = depthData[row * depthWidth + depthXMid]
 
-            for row in stride(from: depthHeight - 1, through: depthGroundStartRow, by: -1) {
+                // Skip sky/background pixels
+                if depthVal > skyDepthThreshold { continue }
+
                 // Map depth pixel to seg pixel
                 let segRow = row * segHeight / depthHeight
                 let segX = depthXMid * segWidth / depthWidth
-
                 let segIdx = segRow * segWidth + min(segX, segWidth - 1)
                 let isWalkable = walkableIDs.contains(segLabels[segIdx])
 
                 if !isWalkable {
-                    obstacleDistance[col] = depthData[row * depthWidth + depthXMid]
+                    obstacleDistance[col] = depthVal
                     break
                 }
             }
         }
 
-        // 4. Surface discontinuities
+        // 4. Surface discontinuities — analyze depth gradients within walkable regions only
         var discontinuities = [Discontinuity]()
-
-        let discStartRow = Int(Float(depthHeight) * (1.0 - discontinuityRegionFraction))
 
         for col in 0..<cols {
             let depthXStart = col * depthWidth / cols
@@ -102,10 +97,20 @@ final class SceneAnalyzer {
             let depthXMid = (depthXStart + depthXEnd) / 2
             guard depthXMid < depthWidth else { continue }
 
-            // Extract vertical depth profile (bottom up)
+            // Extract depth profile within walkable pixels only (bottom up)
             var profile = [Float]()
-            for row in stride(from: depthHeight - 1, through: discStartRow, by: -1) {
-                profile.append(depthData[row * depthWidth + depthXMid])
+            for row in stride(from: depthHeight - 1, through: 0, by: -1) {
+                let depthVal = depthData[row * depthWidth + depthXMid]
+                if depthVal > skyDepthThreshold { continue }
+
+                // Check if this pixel is walkable
+                let segRow = row * segHeight / depthHeight
+                let segX = depthXMid * segWidth / depthWidth
+                let segIdx = segRow * segWidth + min(segX, segWidth - 1)
+
+                if walkableIDs.contains(segLabels[segIdx]) {
+                    profile.append(depthVal)
+                }
             }
 
             guard profile.count >= 2 else { continue }
@@ -130,7 +135,6 @@ final class SceneAnalyzer {
 
             for i in 0..<gradients.count {
                 let absG = abs(gradients[i])
-                // Must exceed absolute minimum AND be significantly above median
                 let isOutlier = medianGrad > 0 ? (absG / medianGrad) > 3.0 : absG > discontinuityMinAbsGradient
                 if absG >= discontinuityMinAbsGradient && isOutlier {
                     let normalized = absG / maxAbsGradient
@@ -147,7 +151,6 @@ final class SceneAnalyzer {
                 let grad = gradients[bestIdx]
                 let normalized = abs(grad) / maxAbsGradient
                 let direction: DiscontinuityDir = grad > 0 ? .dropaway : .riseup
-                // Depth at this point (profile is bottom-up, so index maps to row)
                 let depthAtDisc = profile[bestIdx]
 
                 discontinuities.append(Discontinuity(
@@ -160,20 +163,28 @@ final class SceneAnalyzer {
             }
         }
 
-        // 5. Ground plane ratio
-        var totalGroundPixels = 0
-        var walkableGroundPixels = 0
+        // 5. Ground plane ratio — full image, exclude sky
+        var nonSkyPixels = 0
+        var walkablePixels = 0
 
-        for row in segGroundStartRow..<segHeight {
+        for row in 0..<segHeight {
             for x in 0..<segWidth {
-                totalGroundPixels += 1
+                // Map seg pixel to depth to check for sky
+                let depthRow = row * depthHeight / segHeight
+                let depthX = x * depthWidth / segWidth
+                if depthRow < depthHeight && depthX < depthWidth {
+                    let depthVal = depthData[depthRow * depthWidth + depthX]
+                    if depthVal > skyDepthThreshold { continue }
+                }
+
+                nonSkyPixels += 1
                 if walkableIDs.contains(segLabels[row * segWidth + x]) {
-                    walkableGroundPixels += 1
+                    walkablePixels += 1
                 }
             }
         }
 
-        let groundPlaneRatio = totalGroundPixels > 0 ? Float(walkableGroundPixels) / Float(totalGroundPixels) : 0
+        let groundPlaneRatio = nonSkyPixels > 0 ? Float(walkablePixels) / Float(nonSkyPixels) : 0
 
         return SceneUnderstanding(
             columns: cols,
