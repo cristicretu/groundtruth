@@ -140,6 +140,29 @@ struct BirdEyeView: View {
                 lineWidth: 2
             )
         }
+
+        // Draw fused detected objects
+        for object in packet.detectedObjects {
+            let halfGrid = Float(gridSize) / 2.0
+            let gx = Int((object.posX / packet.cellSize) + halfGrid)
+            let gz = Int((object.posZ / packet.cellSize) + halfGrid)
+
+            guard gx >= 0 && gx < gridSize && gz >= 0 && gz < gridSize else { continue }
+
+            let displayZ = gridSize - 1 - gz
+            let cx = offsetX + (CGFloat(gx) + 0.5) * cellPixels
+            let cy = offsetY + (CGFloat(displayZ) + 0.5) * cellPixels
+            let markerColor = colorForDetectedObject(object.type)
+            let markerSize: CGFloat = max(4, cellPixels * 2.0)
+
+            let markerRect = CGRect(
+                x: cx - markerSize / 2,
+                y: cy - markerSize / 2,
+                width: markerSize,
+                height: markerSize
+            )
+            context.fill(Path(ellipseIn: markerRect), with: .color(markerColor))
+        }
         
         // Draw user position (center of grid)
         let userX = offsetX + CGFloat(gridSize / 2) * cellPixels + cellPixels / 2
@@ -240,6 +263,16 @@ struct BirdEyeView: View {
         default: return .white
         }
     }
+
+    private func colorForDetectedObject(_ type: String) -> Color {
+        switch type {
+        case "person": return .cyan
+        case "car", "bus", "truck", "motorcycle", "bicycle": return .red
+        case "dog": return .mint
+        case "traffic light", "stop sign": return .orange
+        default: return .white
+        }
+    }
 }
 
 // MARK: - Sidebar
@@ -297,6 +330,18 @@ struct SidebarView: View {
                 
                 ForEach(Array(p.elevationChanges.prefix(5).enumerated()), id: \.offset) { _, change in
                     warningRow(change)
+                }
+            }
+
+            if let p = stream.packet, !p.detectedObjects.isEmpty {
+                Divider().background(Color.gray)
+
+                Text("OBJECTS")
+                    .font(.system(size: 12, weight: .bold, design: .monospaced))
+                    .foregroundColor(.cyan)
+
+                ForEach(Array(p.detectedObjects.prefix(5).enumerated()), id: \.offset) { _, object in
+                    detectedObjectRow(object)
                 }
             }
             
@@ -360,6 +405,21 @@ struct SidebarView: View {
                 .fill(color)
                 .frame(width: 12, height: 12)
             Text(label)
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundColor(.gray)
+        }
+    }
+
+    private func detectedObjectRow(_ object: StreamDetectedObject) -> some View {
+        HStack {
+            Circle()
+                .fill(.cyan)
+                .frame(width: 6, height: 6)
+            Text(object.type)
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundColor(.white)
+            Spacer()
+            Text(String(format: "%.1fm", object.distance))
                 .font(.system(size: 10, design: .monospaced))
                 .foregroundColor(.gray)
         }
@@ -512,6 +572,15 @@ struct StreamElevationChange: Codable {
     var heightChange: Float
 }
 
+struct StreamDetectedObject: Codable {
+    var type: String
+    var confidence: Float
+    var posX: Float
+    var posZ: Float
+    var distance: Float
+    var bearing: Float
+}
+
 struct StreamPacket: Codable {
     var timestamp: Double = 0
     var userPosition: [Float] = [0, 0, 0]
@@ -530,4 +599,5 @@ struct StreamPacket: Codable {
     var stepCells: Int = 0
     
     var elevationChanges: [StreamElevationChange] = []
+    var detectedObjects: [StreamDetectedObject] = []
 }

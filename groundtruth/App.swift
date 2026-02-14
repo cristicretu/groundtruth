@@ -3,6 +3,7 @@
 import SwiftUI
 import Combine
 import ARKit
+import Foundation
 
 @main
 struct PathfinderApp: App {
@@ -212,6 +213,24 @@ final class NavigationEngine: ObservableObject {
     private let debugStream = DebugStream()
     private let detector = ObjectDetector()
     private let processingQueue = DispatchQueue(label: "processing", qos: .userInteractive)
+    private let inferenceQueue = DispatchQueue(label: "inference", qos: .userInitiated, attributes: .concurrent)
+    private let inferenceLock = NSLock()
+    private lazy var depthEstimator: DepthEstimator? = {
+        let candidates = ["DepthAnythingV2Small", "depthanythingv2small"]
+        let modelURL = candidates.compactMap { Bundle.main.url(forResource: $0, withExtension: "mlmodelc") }.first
+        guard let modelURL else {
+            print("[Depth] DepthAnythingV2Small.mlmodelc not found in bundle")
+            return nil
+        }
+        do {
+            let estimator = try DepthEstimator(modelURL: modelURL)
+            print("[Depth] model loaded successfully")
+            return estimator
+        } catch {
+            print("[Depth] failed to load model: \(error)")
+            return nil
+        }
+    }()
     
     @Published private(set) var isRunning = false
     @Published private(set) var fps: Int = 0
@@ -231,6 +250,7 @@ final class NavigationEngine: ObservableObject {
     
     init() {
         print("[Engine] init")
+        _ = depthEstimator
         
         // wire up sensor callback - runs on sensor queue
         sensors.onFrame = { [weak self] frame in
@@ -407,8 +427,68 @@ final class NavigationEngine: ObservableObject {
         }
 
         // Run YOLO detection every Nth frame
+        var streamedDetectedObjects: [StreamDetectedObject] = []
         if frameProcessCount % DetectionConfig.inferenceInterval == 0 {
-            let detections = detector.detect(pixelBuffer: frame.capturedImage)
+            let pixelBuffer = frame.capturedImage
+            var detections: [Detection] = []
+            var depthMap: DepthMap?
+            let group = DispatchGroup()
+
+            group.enter()
+            inferenceQueue.async { [weak self] in
+                guard let self else { group.leave(); return }
+                let result = self.detector.detect(pixelBuffer: pixelBuffer)
+                self.inferenceLock.lock()
+                detections = result
+                self.inferenceLock.unlock()
+                group.leave()
+            }
+
+            group.enter()
+            inferenceQueue.async { [weak self] in
+                guard let self, let estimator = self.depthEstimator else { group.leave(); return }
+                do {
+                    let result = try estimator.estimate(pixelBuffer: pixelBuffer)
+                    self.inferenceLock.lock()
+                    depthMap = result
+                    self.inferenceLock.unlock()
+                } catch {
+                    print("[Depth] inference failed: \(error)")
+                }
+                group.leave()
+            }
+
+            group.wait()
+
+            if let depthMap {
+                for detection in detections {
+                    let distance = depthMap.averageDepth(in: detection.boundingBox)
+                    guard distance.isFinite, distance > 0.5, distance < 30.0 else { continue }
+
+                    let estimatedWidth = Float(detection.boundingBox.width) * 2 * distance * tan(1.047)
+                    grid.updateFromDetection(
+                        bearing: detection.bearing,
+                        distance: distance,
+                        width: estimatedWidth,
+                        type: detection.objectType,
+                        confidence: detection.confidence
+                    )
+
+                    let posX = sin(detection.bearing) * distance
+                    let posZ = cos(detection.bearing) * distance
+                    streamedDetectedObjects.append(
+                        StreamDetectedObject(
+                            type: detection.objectType.label,
+                            confidence: detection.confidence,
+                            posX: posX,
+                            posZ: posZ,
+                            distance: distance,
+                            bearing: detection.bearing
+                        )
+                    )
+                }
+            }
+
             if !detections.isEmpty && frameProcessCount % 60 == 0 {
                 let summary = detections.prefix(3).map { "\($0.objectType.label)(\(String(format: "%.0f%%", $0.confidence * 100)))" }.joined(separator: ", ")
                 print("[Detector] \(detections.count) objects: \(summary) [\(String(format: "%.1f", detector.inferenceTimeMs))ms]")
@@ -442,7 +522,8 @@ final class NavigationEngine: ObservableObject {
             userHeading: smoothHeading,
             grid: grid,
             elevationChanges: elevationChanges,
-            nearestObstacle: nearest
+            nearestObstacle: nearest,
+            detectedObjects: streamedDetectedObjects
         )
         
         // Debug log periodically

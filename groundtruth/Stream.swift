@@ -105,7 +105,8 @@ final class DebugStream {
         userHeading: Float,
         grid: OccupancyGrid,
         elevationChanges: [ElevationChange] = [],
-        nearestObstacle: Float = .infinity
+        nearestObstacle: Float = .infinity,
+        detectedObjects: [StreamDetectedObject] = []
     ) {
         guard isConnected else { return }
         
@@ -161,6 +162,7 @@ final class DebugStream {
                 heightChange: change.heightChange
             )
         }
+        packet.detectedObjects = detectedObjects
         
         // serialize and send
         if let data = try? JSONEncoder().encode(packet) {
@@ -195,6 +197,15 @@ struct StreamElevationChange: Codable {
     var heightChange: Float
 }
 
+struct StreamDetectedObject: Codable {
+    var type: String
+    var confidence: Float
+    var posX: Float
+    var posZ: Float
+    var distance: Float
+    var bearing: Float
+}
+
 // Packet structure for streaming (matches Mac side)
 struct StreamPacket: Codable {
     var timestamp: Double = 0
@@ -218,4 +229,7 @@ struct StreamPacket: Codable {
     
     // Detected elevation changes
     var elevationChanges: [StreamElevationChange] = []
+
+    // Fused YOLO + depth detections in user-relative coordinates
+    var detectedObjects: [StreamDetectedObject] = []
 }
