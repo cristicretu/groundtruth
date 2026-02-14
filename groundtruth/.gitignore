@@ -61,3 +61,7 @@ Thumbs.db
 
 # Debug output
 *.log
+
+# CoreML models
+*.mlmodelc
+*.mlpackage
