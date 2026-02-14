@@ -4,9 +4,15 @@ final class SceneAnalyzer {
     var columns: Int = 36
 
     /// Set of segmentation label IDs considered walkable.
-    /// Default: common COCO panoptic stuff IDs for ground surfaces.
-    /// road=21, sidewalk=52, terrain=94, floor=4, carpet=29, rug=131, pavement/road(alt)=7, ground=14
-    var walkableIDs: Set<UInt8> = [4, 7, 14, 21, 29, 52, 94, 131]
+    /// DETR COCO panoptic class IDs for ground/floor surfaces:
+    /// 101=carpet, 111=dirt, 114=floor-marble, 115=floor-other, 116=floor-stone,
+    /// 117=floor-tile, 118=floor-wood, 124=grass, 125=gravel, 126=ground-other,
+    /// 131=mat, 136=mud, 140=pavement, 144=platform, 145=playingfield,
+    /// 147=railroad, 149=road, 152=rug, 154=sand, 161=stairs
+    var walkableIDs: Set<UInt8> = [
+        101, 111, 114, 115, 116, 117, 118, 124, 125, 126,
+        131, 136, 140, 144, 145, 147, 149, 152, 154, 161
+    ]
 
     /// Fraction of image height from bottom considered ground region for traversability.
     var groundRegionFraction: Float = 0.6

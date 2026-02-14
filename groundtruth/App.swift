@@ -188,6 +188,7 @@ final class NavigationEngine: ObservableObject {
     private var smoothHeading: Float = 0
     private var isHeadingInitialized = false
     private var lastFrameTime: TimeInterval = 0
+    private var isProcessing = false
 
     init() {
         print("[Engine] init")
@@ -200,10 +201,11 @@ final class NavigationEngine: ObservableObject {
             print("[Engine] VisionPipeline failed to load: \(error)")
         }
 
-        // wire up sensor callback
+        // wire up sensor callback — drop frames if still processing previous
         sensors.onFrame = { [weak self] frame in
-            self?.processingQueue.async {
-                self?.processFrame(frame)
+            guard let self, !self.isProcessing else { return }
+            self.processingQueue.async {
+                self.processFrame(frame)
             }
         }
 
@@ -282,6 +284,9 @@ final class NavigationEngine: ObservableObject {
     // MARK: - Frame Processing Pipeline
 
     private func processFrame(_ frame: ARFrame) {
+        isProcessing = true
+        defer { isProcessing = false }
+
         let frameStart = CACurrentMediaTime()
         frameProcessCount += 1
 
@@ -334,6 +339,18 @@ final class NavigationEngine: ObservableObject {
             return
         }
         let visionTime = (CACurrentMediaTime() - visionStart) * 1000 // ms
+
+        // Debug: log seg/depth stats on first few frames
+        if frameProcessCount <= 3 {
+            let classCounts = Dictionary(grouping: vision.segLabels, by: { $0 })
+                .mapValues { $0.count }
+                .sorted { $0.value > $1.value }
+            print("[DEBUG-SEG] Class distribution: \(classCounts.prefix(15))")
+            let dMin = vision.depthData.min() ?? 0
+            let dMax = vision.depthData.max() ?? 0
+            print("[DEBUG] depth: \(vision.depthWidth)x\(vision.depthHeight), range: \(dMin) to \(dMax)")
+            print("[DEBUG] seg: \(vision.segWidth)x\(vision.segHeight), unique classes: \(Set(vision.segLabels).sorted())")
+        }
 
         // 2. Analyze scene (pure math, fast)
         let scene = sceneAnalyzer.analyze(

@@ -2,6 +2,7 @@ import CoreML
 import Vision
 import CoreVideo
 import QuartzCore
+import Accelerate
 
 enum VisionPipelineError: Error {
     case modelNotFound(String)
@@ -77,33 +78,94 @@ final class VisionPipeline {
                 return
             }
 
-            guard let result = request.results?.first as? VNCoreMLFeatureValueObservation,
-                  let multiArray = result.featureValue.multiArrayValue else {
-                print("[VISION] depth: no results")
+            guard let results = request.results, !results.isEmpty else {
+                print("[VISION] depth: no results at all")
                 return
             }
 
-            let shape = multiArray.shape.map { $0.intValue }
-            let h: Int
-            let w: Int
-            if shape.count == 3 {
-                h = shape[1]; w = shape[2]
-            } else if shape.count == 2 {
-                h = shape[0]; w = shape[1]
+            // Log result types on first frame for debugging
+            if self.isFirstFrame {
+                for (i, r) in results.enumerated() {
+                    print("[VISION] depth result[\(i)]: \(type(of: r))")
+                }
+            }
+
+            // Try VNPixelBufferObservation first (common for depth models)
+            if let pixelObs = results.first as? VNPixelBufferObservation {
+                let pb = pixelObs.pixelBuffer
+                let w = CVPixelBufferGetWidth(pb)
+                let h = CVPixelBufferGetHeight(pb)
+                CVPixelBufferLockBaseAddress(pb, .readOnly)
+                defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+
+                let count = w * h
+                var data = [Float](repeating: 0, count: count)
+                let format = CVPixelBufferGetPixelFormatType(pb)
+
+                if format == kCVPixelFormatType_DepthFloat32 || format == kCVPixelFormatType_OneComponent32Float || format == 0x66743332 /* 'ft32' */ {
+                    // 32-bit float per pixel
+                    if let base = CVPixelBufferGetBaseAddress(pb)?.assumingMemoryBound(to: Float.self) {
+                        for i in 0..<count { data[i] = base[i] }
+                    }
+                } else if format == kCVPixelFormatType_OneComponent16Half || format == 0x66743136 /* 'ft16' */ {
+                    // 16-bit float per pixel — bulk convert via Accelerate
+                    if let base = CVPixelBufferGetBaseAddress(pb) {
+                        let srcPtr = base.assumingMemoryBound(to: UInt16.self)
+                        data.withUnsafeMutableBufferPointer { dstBuf in
+                            var src = vImage_Buffer(data: UnsafeMutableRawPointer(mutating: srcPtr), height: vImagePixelCount(h), width: vImagePixelCount(w), rowBytes: CVPixelBufferGetBytesPerRow(pb))
+                            var dst = vImage_Buffer(data: dstBuf.baseAddress!, height: vImagePixelCount(h), width: vImagePixelCount(w), rowBytes: w * 4)
+                            vImageConvert_Planar16FtoPlanarF(&src, &dst, 0)
+                        }
+                    }
+                } else if format == kCVPixelFormatType_OneComponent8 {
+                    // 8-bit grayscale, normalize to 0-1
+                    if let base = CVPixelBufferGetBaseAddress(pb)?.assumingMemoryBound(to: UInt8.self) {
+                        for i in 0..<count { data[i] = Float(base[i]) / 255.0 }
+                    }
+                } else {
+                    // Unknown format — try reading as float anyway
+                    print("[VISION] depth: unknown pixel format \(format) (\(String(format: "0x%08X", format))), trying float32")
+                    if let base = CVPixelBufferGetBaseAddress(pb)?.assumingMemoryBound(to: Float.self) {
+                        for i in 0..<count { data[i] = base[i] }
+                    }
+                }
+
+                if self.isFirstFrame {
+                    print("[VISION] depth via PixelBuffer: \(w)x\(h), format=\(String(format: "0x%08X", format))")
+                }
+
+                depthWidth = w
+                depthHeight = h
+                depthData = data
+            }
+            // Fall back to VNCoreMLFeatureValueObservation (MLMultiArray)
+            else if let featureObs = results.first as? VNCoreMLFeatureValueObservation,
+                    let multiArray = featureObs.featureValue.multiArrayValue {
+                let shape = multiArray.shape.map { $0.intValue }
+                let h: Int
+                let w: Int
+                if shape.count == 3 {
+                    h = shape[1]; w = shape[2]
+                } else if shape.count == 2 {
+                    h = shape[0]; w = shape[1]
+                } else {
+                    print("[VISION] depth: unexpected shape \(shape)")
+                    return
+                }
+
+                let count = h * w
+                var data = [Float](repeating: 0, count: count)
+                for i in 0..<count {
+                    data[i] = multiArray[i].floatValue
+                }
+
+                depthWidth = w
+                depthHeight = h
+                depthData = data
             } else {
-                print("[VISION] depth: unexpected shape \(shape)")
+                print("[VISION] depth: unrecognized result type: \(type(of: results.first!))")
                 return
             }
-
-            let count = h * w
-            var data = [Float](repeating: 0, count: count)
-            for i in 0..<count {
-                data[i] = multiArray[i].floatValue
-            }
-
-            depthWidth = w
-            depthHeight = h
-            depthData = data
             depthMs = (CACurrentMediaTime() - start) * 1000
         }
 
