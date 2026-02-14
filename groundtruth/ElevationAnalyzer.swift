@@ -173,9 +173,9 @@ final class ElevationAnalyzer {
         let dx = Float(x - centerX) * grid.cellSize
         let dz = Float(z - centerZ) * grid.cellSize
         let distance = sqrt(dx * dx + dz * dz)
-        // Grid is already aligned to user-forward (OccupancyGrid.worldToGrid rotates by -userHeading),
-        // so the angle is already relative to the user.
-        let relAngle = normalizeAngle(atan2(dx, dz))
+        // Grid is world-aligned, so subtract userHeading to get angle relative to user.
+        let worldAngle = atan2(dx, dz)
+        let relAngle = normalizeAngle(worldAngle - userHeading)
         
         // Confidence based on cell validity
         // Confidence from hit density; also require more evidence for dropoffs.

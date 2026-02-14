@@ -1,1 +1,5 @@
 .build/
+# YOLO export artifacts (generated locally)
+scripts/*.mlpackage/
+scripts/*.pt
+scripts/__pycache__/

@@ -10,10 +10,22 @@ enum GridConfig {
     static let cellSize: Float = 0.1        // 10cm cells
     static let gridSize: Int = 200          // 200x200 = 20m x 20m coverage
     static let maxDistance: Float = 10.0    // Max range to process
-    
+    static let recenterEdgeMargin: Float = 0.20  // Re-center when within 20% of edge
+    static let defaultUserHeight: Float = 1.6    // Fallback floor = userY - this
+    static let maxObstacleHeight: Float = 2.0    // Ignore points above this (ceiling)
+
     // Derived
     static var gridExtent: Float { Float(gridSize) * cellSize }  // 20m
     static var halfGrid: Float { Float(gridSize) / 2.0 }
+}
+
+// MARK: - Mesh Processing
+
+enum MeshProcessingConfig {
+    static let floorSampleStride: Int = 8        // Sample every Nth vertex for floor detection
+    static let vertexStride: Int = 2             // Sample every Nth vertex for cell population
+    static let floorSampleRadius: Float = 2.0    // Meters from user for floor samples
+    static let anchorRangeBuffer: Float = 2.0    // Extra meters for anchor range check
 }
 
 // MARK: - Elevation Thresholds
@@ -71,6 +83,14 @@ enum AudioConfig {
     
     // Elevation warning interval
     static let elevationWarningInterval: Double = 0.5
+}
+
+// MARK: - Detection (YOLO)
+
+enum DetectionConfig {
+    static let minConfidence: Float = 0.4
+    static let cameraHFOV: Float = 2.094     // ~120° ultrawide
+    static let inferenceInterval: Int = 3     // Every 3rd frame (~20Hz)
 }
 
 // MARK: - Processing

@@ -210,6 +210,7 @@ final class NavigationEngine: ObservableObject {
     private let gridBuilder = OccupancyGridBuilder()  // Uses GridConfig defaults
     private let audio = SpatialAudio()
     private let debugStream = DebugStream()
+    private let detector = ObjectDetector()
     private let processingQueue = DispatchQueue(label: "processing", qos: .userInteractive)
     
     @Published private(set) var isRunning = false
@@ -226,6 +227,7 @@ final class NavigationEngine: ObservableObject {
     private var lastUserHeading: Float = 0
     private var smoothHeading: Float = 0
     private var isHeadingInitialized = false
+    private var lastFrameTime: TimeInterval = 0
     
     init() {
         print("[Engine] init")
@@ -356,11 +358,22 @@ final class NavigationEngine: ObservableObject {
         // Get mesh anchors
         let meshAnchors = sensors.getMeshAnchors()
         
+        // Compute delta time
+        let currentTime = frame.timestamp
+        let deltaTime: Float
+        if lastFrameTime > 0 {
+            deltaTime = Float(currentTime - lastFrameTime)
+        } else {
+            deltaTime = 1.0 / 60.0
+        }
+        lastFrameTime = currentTime
+
         // Build occupancy grid from mesh
         var grid = gridBuilder.build(
             from: meshAnchors,
             userPosition: userPosition,
-            userHeading: smoothHeading
+            userHeading: smoothHeading,
+            deltaTime: deltaTime
         )
         
         // Analyze for elevation changes
@@ -390,6 +403,15 @@ final class NavigationEngine: ObservableObject {
                 if grid.cells[gx][gz].state != .occupied {
                     grid.cells[gx][gz].state = mapped
                 }
+            }
+        }
+
+        // Run YOLO detection every Nth frame
+        if frameProcessCount % DetectionConfig.inferenceInterval == 0 {
+            let detections = detector.detect(pixelBuffer: frame.capturedImage)
+            if !detections.isEmpty && frameProcessCount % 60 == 0 {
+                let summary = detections.prefix(3).map { "\($0.objectType.label)(\(String(format: "%.0f%%", $0.confidence * 100)))" }.joined(separator: ", ")
+                print("[Detector] \(detections.count) objects: \(summary) [\(String(format: "%.1f", detector.inferenceTimeMs))ms]")
             }
         }
 
