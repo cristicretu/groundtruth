@@ -317,6 +317,20 @@ struct SidebarView: View {
                     statRow("Nearest", String(format: "%.2fm", p.nearestObstacle))
                     statRow("Floor", String(format: "%.2fm", p.floorHeight))
                     statRow("Heading", String(format: "%.0f°", p.userHeading * 180 / .pi))
+
+                    if let gh = p.navigationHeading {
+                        Divider().background(Color.gray)
+                        statRow("Nav Hdg", String(format: "%.0f°", gh * 180 / .pi))
+                    }
+                    if let gc = p.groundConfidence {
+                        statRow("Ground", String(format: "%.0f%%", gc * 100), color: gc < 0.3 ? .red : gc < 0.6 ? .yellow : .green)
+                    }
+                    if let od = p.obstacleDistance, od < 100 {
+                        statRow("Obstacle", String(format: "%.2fm", od), color: od < 1.0 ? .red : od < 2.0 ? .yellow : .cyan)
+                    }
+                    if let dc = p.discontinuityCount, dc > 0, let dd = p.nearestDiscontinuityDistance {
+                        statRow("Disc", String(format: "%.1fm (%d)", dd, dc), color: .orange)
+                    }
                 }
             }
             
@@ -587,17 +601,24 @@ struct StreamPacket: Codable {
     var userHeading: Float = 0
     var nearestObstacle: Float = .infinity
     var floorHeight: Float = 0
-    
+
     var gridSize: Int = 200
     var cellSize: Float = 0.1
-    
+
     var cellStates: [UInt8] = []
     var cellElevations: [Int8] = []
-    
+
     var validCells: Int = 0
     var obstacleCells: Int = 0
     var stepCells: Int = 0
-    
+
     var elevationChanges: [StreamElevationChange] = []
     var detectedObjects: [StreamDetectedObject] = []
+
+    // Navigation pipeline fields
+    var navigationHeading: Float?
+    var groundConfidence: Float?
+    var discontinuityCount: Int?
+    var nearestDiscontinuityDistance: Float?
+    var obstacleDistance: Float?
 }

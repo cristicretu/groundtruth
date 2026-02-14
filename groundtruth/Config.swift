@@ -99,13 +99,19 @@ enum ProcessingConfig {
     // Heading smoothing - 0.2 = ~5 frame smoothing
     // Reduces BEV jitter from ARKit pose noise
     static let headingSmoothingAlpha: Float = 0.2
-    
+
     // Floor detection - samples needed for median
     static let minFloorSamples: Int = 10
-    
+
     // Cell validity - minimum hits to trust
     static let minHitCount: UInt16 = 5
-    
+
     // Merge threshold for elevation warnings (meters)
     static let elevationMergeThreshold: Float = 0.5
+}
+
+// MARK: - Vision Pipeline (camera-only)
+
+enum VisionPipelineConfig {
+    static let maxProcessingTimeMs: Double = 100    // Budget for depth + seg per frame
 }
