@@ -50,11 +50,11 @@ public final class DepthEstimator {
         let scale = depthScale
         let maxDepth = maxReliableDepth
 
-        let ptr = multiArray.dataPointer.bindMemory(to: Float.self, capacity: count)
         var depthData = [Float](repeating: 0, count: count)
 
         for i in 0..<count {
-            let relative = ptr[i]
+            // Do not bind raw pointer as Float blindly: model outputs can be Float16/Double.
+            let relative = multiArray[i].floatValue
             let meters = scale / (relative + epsilon)
             depthData[i] = min(max(meters, 0), maxDepth)
         }

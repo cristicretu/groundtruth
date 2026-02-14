@@ -23,7 +23,7 @@ enum GridConfig {
 
 enum MeshProcessingConfig {
     static let floorSampleStride: Int = 8        // Sample every Nth vertex for floor detection
-    static let vertexStride: Int = 2             // Sample every Nth vertex for cell population
+    static let vertexStride: Int = 4             // Sample every Nth vertex for cell population
     static let floorSampleRadius: Float = 2.0    // Meters from user for floor samples
     static let anchorRangeBuffer: Float = 2.0    // Extra meters for anchor range check
 }
@@ -40,7 +40,7 @@ enum ElevationConfig {
     static let stairTolerance: Float = 0.03 // ±3cm for stair detection
     
     // Obstacle detection
-    static let obstacleHeight: Float = 0.25 // Height above floor to be obstacle
+    static let obstacleHeight: Float = 0.40 // Height above floor to be obstacle (walls, furniture, cars — not bumps)
     static let floorTolerance: Float = 0.20 // Height from floor to count as floor sample
 }
 
@@ -90,7 +90,7 @@ enum AudioConfig {
 enum DetectionConfig {
     static let minConfidence: Float = 0.4
     static let cameraHFOV: Float = 2.094     // ~120° ultrawide
-    static let inferenceInterval: Int = 3     // Every 3rd frame (~20Hz)
+    static let inferenceInterval: Int = 6     // YOLO and depth alternate every 6th frame (offset by 3)
 }
 
 // MARK: - Processing
@@ -104,7 +104,7 @@ enum ProcessingConfig {
     static let minFloorSamples: Int = 10
     
     // Cell validity - minimum hits to trust
-    static let minHitCount: UInt16 = 3
+    static let minHitCount: UInt16 = 5
     
     // Merge threshold for elevation warnings (meters)
     static let elevationMergeThreshold: Float = 0.5

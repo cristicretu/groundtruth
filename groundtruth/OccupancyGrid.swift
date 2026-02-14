@@ -440,6 +440,31 @@ final class OccupancyGridBuilder {
             }
         }
 
+        // Filter isolated obstacle cells — real obstacles are never 1 cell wide.
+        // If an obstacle cell has zero obstacle neighbors (all 8 are free/unknown), reclassify as unknown.
+        for x in 0..<grid.gridSize {
+            for z in 0..<grid.gridSize {
+                guard grid.cells[x][z].state == .occupied else { continue }
+                var hasObstacleNeighbor = false
+                for dx in -1...1 {
+                    for dz in -1...1 {
+                        if dx == 0 && dz == 0 { continue }
+                        let nx = x + dx, nz = z + dz
+                        guard nx >= 0, nx < grid.gridSize, nz >= 0, nz < grid.gridSize else { continue }
+                        if grid.cells[nx][nz].state == .occupied {
+                            hasObstacleNeighbor = true
+                            break
+                        }
+                    }
+                    if hasObstacleNeighbor { break }
+                }
+                if !hasObstacleNeighbor {
+                    grid.cells[x][z].state = .unknown
+                    obstacleCount -= 1
+                }
+            }
+        }
+
         grid.validCellCount = validCount
         grid.obstacleCellCount = obstacleCount
         grid.stepCellCount = stepCount

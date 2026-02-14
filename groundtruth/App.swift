@@ -213,8 +213,6 @@ final class NavigationEngine: ObservableObject {
     private let debugStream = DebugStream()
     private let detector = ObjectDetector()
     private let processingQueue = DispatchQueue(label: "processing", qos: .userInteractive)
-    private let inferenceQueue = DispatchQueue(label: "inference", qos: .userInitiated, attributes: .concurrent)
-    private let inferenceLock = NSLock()
     private lazy var depthEstimator: DepthEstimator? = {
         let candidates = ["DepthAnythingV2Small", "depthanythingv2small"]
         let modelURL = candidates.compactMap { Bundle.main.url(forResource: $0, withExtension: "mlmodelc") }.first
@@ -247,6 +245,7 @@ final class NavigationEngine: ObservableObject {
     private var smoothHeading: Float = 0
     private var isHeadingInitialized = false
     private var lastFrameTime: TimeInterval = 0
+    private var lastDepthMap: DepthMap?
     
     init() {
         print("[Engine] init")
@@ -341,7 +340,19 @@ final class NavigationEngine: ObservableObject {
     // Called on processing queue
     private func processFrame(_ frame: ARFrame) {
         frameProcessCount += 1
-        
+
+        // Copy pixel buffer NOW while it's still valid — ARKit recycles aggressively.
+        let interval = DetectionConfig.inferenceInterval
+        let needsInference = (frameProcessCount % interval == 0) || (frameProcessCount % interval == interval / 2)
+        let inferencePixelBuffer: CVPixelBuffer? = needsInference ? copyPixelBuffer(frame.capturedImage) : nil
+
+        // Camera debug — print every frame
+        let fx = frame.camera.intrinsics[0][0]
+        let camWidth = Float(CVPixelBufferGetWidth(frame.capturedImage))
+        let camHeight = Float(CVPixelBufferGetHeight(frame.capturedImage))
+        let hfov = 2 * atan(camWidth / (2 * fx))
+        print("[CAMERA] resolution: \(camWidth)x\(camHeight) hfov: \(String(format: "%.1f", hfov * 180 / .pi))°")
+
         // Extract user pose
         let transform = frame.camera.transform
         let userPosition = simd_float3(
@@ -426,44 +437,24 @@ final class NavigationEngine: ObservableObject {
             }
         }
 
-        // Run YOLO detection every Nth frame
+        // Run YOLO and depth on alternating frames (every 6th, offset by 3)
+        // Frame 0,6,12... → YOLO | Frame 3,9,15... → Depth
         var streamedDetectedObjects: [StreamDetectedObject] = []
-        if frameProcessCount % DetectionConfig.inferenceInterval == 0 {
-            let pixelBuffer = frame.capturedImage
-            var detections: [Detection] = []
-            var depthMap: DepthMap?
-            let group = DispatchGroup()
+        let runYOLO = frameProcessCount % interval == 0
+        let runDepth = frameProcessCount % interval == interval / 2
 
-            group.enter()
-            inferenceQueue.async { [weak self] in
-                guard let self else { group.leave(); return }
-                let result = self.detector.detect(pixelBuffer: pixelBuffer)
-                self.inferenceLock.lock()
-                detections = result
-                self.inferenceLock.unlock()
-                group.leave()
-            }
+        if runYOLO, let pixelBuffer = inferencePixelBuffer {
+            print("[Frame \(frameProcessCount)] YOLO")
+            let detections = detector.detect(pixelBuffer: pixelBuffer)
 
-            group.enter()
-            inferenceQueue.async { [weak self] in
-                guard let self, let estimator = self.depthEstimator else { group.leave(); return }
-                do {
-                    let result = try estimator.estimate(pixelBuffer: pixelBuffer)
-                    self.inferenceLock.lock()
-                    depthMap = result
-                    self.inferenceLock.unlock()
-                } catch {
-                    print("[Depth] inference failed: \(error)")
-                }
-                group.leave()
-            }
-
-            group.wait()
-
-            if let depthMap {
+            // Use last depth map if available to fuse detection + distance
+            if let depthMap = lastDepthMap {
                 for detection in detections {
                     let distance = depthMap.averageDepth(in: detection.boundingBox)
                     guard distance.isFinite, distance > 0.5, distance < 30.0 else { continue }
+
+                    let bboxCenterX = Float(detection.boundingBox.midX)
+                    print("[YOLO] \(detection.objectType.label) bboxCenterX: \(String(format: "%.3f", bboxCenterX)) bearing: \(String(format: "%.1f", detection.bearing * 180 / .pi))° depth: \(String(format: "%.2f", distance))m")
 
                     let estimatedWidth = Float(detection.boundingBox.width) * 2 * distance * tan(1.047)
                     grid.updateFromDetection(
@@ -492,6 +483,17 @@ final class NavigationEngine: ObservableObject {
             if !detections.isEmpty && frameProcessCount % 60 == 0 {
                 let summary = detections.prefix(3).map { "\($0.objectType.label)(\(String(format: "%.0f%%", $0.confidence * 100)))" }.joined(separator: ", ")
                 print("[Detector] \(detections.count) objects: \(summary) [\(String(format: "%.1f", detector.inferenceTimeMs))ms]")
+            }
+        }
+
+        if runDepth, let pixelBuffer = inferencePixelBuffer {
+            print("[Frame \(frameProcessCount)] Depth")
+            if let estimator = depthEstimator {
+                do {
+                    lastDepthMap = try estimator.estimate(pixelBuffer: pixelBuffer)
+                } catch {
+                    print("[Depth] inference failed: \(error)")
+                }
             }
         }
 
@@ -582,6 +584,42 @@ private func eulerYPR(from m: simd_float4x4) -> (yaw: Float, pitch: Float, roll:
 
 @inline(__always)
 private func clamp(_ v: Float, _ lo: Float, _ hi: Float) -> Float { min(hi, max(lo, v)) }
+
+/// Deep-copy a CVPixelBuffer so ARKit can't recycle the backing memory during inference.
+private func copyPixelBuffer(_ src: CVPixelBuffer) -> CVPixelBuffer? {
+    let width = CVPixelBufferGetWidth(src)
+    let height = CVPixelBufferGetHeight(src)
+    let format = CVPixelBufferGetPixelFormatType(src)
+
+    var dst: CVPixelBuffer?
+    let status = CVPixelBufferCreate(kCFAllocatorDefault, width, height, format, nil, &dst)
+    guard status == kCVReturnSuccess, let dst else { return nil }
+
+    CVPixelBufferLockBaseAddress(src, .readOnly)
+    CVPixelBufferLockBaseAddress(dst, [])
+    defer {
+        CVPixelBufferUnlockBaseAddress(src, .readOnly)
+        CVPixelBufferUnlockBaseAddress(dst, [])
+    }
+
+    let planeCount = CVPixelBufferGetPlaneCount(src)
+    if planeCount > 0 {
+        for plane in 0..<planeCount {
+            let srcAddr = CVPixelBufferGetBaseAddressOfPlane(src, plane)
+            let dstAddr = CVPixelBufferGetBaseAddressOfPlane(dst, plane)
+            let bytesPerRow = CVPixelBufferGetBytesPerRowOfPlane(src, plane)
+            let h = CVPixelBufferGetHeightOfPlane(src, plane)
+            memcpy(dstAddr, srcAddr, bytesPerRow * h)
+        }
+    } else {
+        let srcAddr = CVPixelBufferGetBaseAddress(src)
+        let dstAddr = CVPixelBufferGetBaseAddress(dst)
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(src)
+        memcpy(dstAddr, srcAddr, bytesPerRow * height)
+    }
+
+    return dst
+}
 
 @inline(__always)
 private func normalizeAngle(_ a: Float) -> Float {
