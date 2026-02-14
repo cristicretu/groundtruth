@@ -207,7 +207,7 @@ struct GridStats {
 // The navigation engine - ties everything together
 final class NavigationEngine: ObservableObject {
     private let sensors = Sensors()
-    private let gridBuilder = OccupancyGridBuilder(cellSize: 0.1, gridSize: 200)
+    private let gridBuilder = OccupancyGridBuilder()  // Uses GridConfig defaults
     private let audio = SpatialAudio()
     private let debugStream = DebugStream()
     private let processingQueue = DispatchQueue(label: "processing", qos: .userInteractive)
@@ -339,7 +339,7 @@ final class NavigationEngine: ObservableObject {
             smoothHeading = rawHeading
             isHeadingInitialized = true
         } else {
-            smoothHeading = smoothAngle(current: smoothHeading, target: rawHeading, alpha: 0.2)
+            smoothHeading = smoothAngle(current: smoothHeading, target: rawHeading, alpha: ProcessingConfig.headingSmoothingAlpha)
         }
         
         lastUserPosition = userPosition
@@ -360,8 +360,7 @@ final class NavigationEngine: ObservableObject {
         var grid = gridBuilder.build(
             from: meshAnchors,
             userPosition: userPosition,
-            userHeading: smoothHeading,
-            maxDistance: 10.0
+            userHeading: smoothHeading
         )
         
         // Analyze for elevation changes
@@ -430,15 +429,15 @@ final class NavigationEngine: ObservableObject {
         }
         
         // Update UI on main thread
-        let currentFps = sensors.fps
         let stats = GridStats(
             valid: grid.validCellCount,
             obstacles: grid.obstacleCellCount,
             steps: grid.stepCellCount
         )
         
-        DispatchQueue.main.async {
-            self.fps = currentFps
+        DispatchQueue.main.async { [sensors] in
+            // Read fps on main thread since it's @MainActor
+            self.fps = sensors.fps
             self.nearestObstacle = nearest
             self.elevationWarning = urgent
             self.gridStats = stats

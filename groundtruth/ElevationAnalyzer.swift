@@ -45,16 +45,9 @@ struct ElevationChange: Codable {
     }
 }
 
-// Elevation thresholds (meters)
-struct ElevationThresholds {
-    static let stepMin: Float = 0.05     // 5cm minimum to be a step
-    static let stepMax: Float = 0.20     // 20cm max for step (above = curb)
-    static let curbMin: Float = 0.20     // 20cm minimum for curb
-    static let dropoff: Float = 0.30     // 30cm = dangerous drop
-    static let rampMaxSlope: Float = 0.15 // ~8.5° max slope for ramp
-    static let stairStepSize: Float = 0.18 // ~18cm typical stair step
-    static let stairTolerance: Float = 0.03 // ±3cm for stair detection
-}
+// Elevation thresholds now in Config.swift as ElevationConfig
+// Keeping this typealias for backwards compat during transition
+typealias ElevationThresholds = ElevationConfig
 
 // Analyzer for elevation changes
 final class ElevationAnalyzer {
@@ -96,8 +89,8 @@ final class ElevationAnalyzer {
         // Sort by distance
         changes.sort { $0.distance < $1.distance }
         
-        // Merge nearby changes
-        return mergeNearbyChanges(changes, threshold: grid.cellSize * 3)
+        // Merge nearby changes (reduce "yellow spam" along the same edge)
+        return mergeNearbyChanges(changes, threshold: max(grid.cellSize * 8, ProcessingConfig.elevationMergeThreshold))
     }
     
     // Detect elevation transition at a cell
@@ -109,48 +102,74 @@ final class ElevationAnalyzer {
     ) -> ElevationChange? {
         let cell = grid.cells[x][z]
         guard cell.isValid else { return nil }
+
+        // Only detect steps/curbs on walkable surface.
+        // This avoids wall/furniture edges turning into fake steps.
+        guard cell.state == .free || cell.state == .ramp else { return nil }
         
         // Get neighbor elevations
         let neighbors = [
             (x-1, z), (x+1, z), (x, z-1), (x, z+1),  // Cardinals
             (x-1, z-1), (x+1, z-1), (x-1, z+1), (x+1, z+1)  // Diagonals
         ]
-        
-        var maxDiff: Float = 0
-        var diffDirection: Float = 0 // Positive = step up, negative = step down
-        
+
+        // We want \"step up\" / \"step down\" relative to the user's travel direction:
+        // user (center) -> this cell.
+        // So we compare this cell's elevation to the neighbor that is *closest to the user*.
+        // If this cell is higher than the toward-user neighbor => stepUp.
+        // If lower => stepDown.
+        let centerX = grid.gridSize / 2
+        let centerZ = grid.gridSize / 2
+        let toCell = SIMD2<Float>(Float(x - centerX), Float(z - centerZ))
+        let toCellLen = max(1e-4, simd_length(toCell))
+        let dirToCell = toCell / toCellLen
+        let dirTowardUser = -dirToCell
+
+        var bestNeighbor: (Int, Int)?
+        var bestDot: Float = -Float.infinity
+
         for (nx, nz) in neighbors {
             guard nx >= 0 && nx < grid.gridSize &&
                   nz >= 0 && nz < grid.gridSize else { continue }
             
             let neighbor = grid.cells[nx][nz]
             guard neighbor.isValid else { continue }
-            
-            let diff = cell.elevation - neighbor.elevation
-            if abs(diff) > abs(maxDiff) {
-                maxDiff = diff
-                diffDirection = diff
+            guard neighbor.state == .free || neighbor.state == .ramp else { continue }
+
+            let toN = SIMD2<Float>(Float(nx - x), Float(nz - z))
+            let toNLen = max(1e-4, simd_length(toN))
+            let dirToN = toN / toNLen
+            let dot = simd_dot(dirToN, dirTowardUser) // highest means \"toward user\"
+
+            if dot > bestDot {
+                bestDot = dot
+                bestNeighbor = (nx, nz)
             }
         }
-        
+
+        guard let (nx, nz) = bestNeighbor else { return nil }
+        let neighbor = grid.cells[nx][nz]
+
+        // Height change as you move from user toward this cell.
+        // Positive => going up, Negative => going down.
+        let heightChange = cell.elevation - neighbor.elevation
+        let absDiff = abs(heightChange)
+
         // Check if this is a significant transition
-        let absDiff = abs(maxDiff)
         guard absDiff >= ElevationThresholds.stepMin else { return nil }
         
         // Determine type
         let type: ElevationChangeType
-        if absDiff >= ElevationThresholds.dropoff && diffDirection < 0 {
+        if absDiff >= ElevationThresholds.dropoff && heightChange < 0 {
             type = .dropoff
         } else if absDiff >= ElevationThresholds.curbMin {
-            type = diffDirection > 0 ? .curbUp : .curbDown
+            type = heightChange > 0 ? .curbUp : .curbDown
         } else {
-            type = diffDirection > 0 ? .stepUp : .stepDown
+            type = heightChange > 0 ? .stepUp : .stepDown
         }
         
         // Calculate position and angle
         let (worldX, worldZ) = grid.gridToWorld(x, z)
-        let centerX = grid.gridSize / 2
-        let centerZ = grid.gridSize / 2
         let dx = Float(x - centerX) * grid.cellSize
         let dz = Float(z - centerZ) * grid.cellSize
         let distance = sqrt(dx * dx + dz * dz)
@@ -159,14 +178,17 @@ final class ElevationAnalyzer {
         let relAngle = normalizeAngle(atan2(dx, dz))
         
         // Confidence based on cell validity
-        let confidence = min(1.0, Float(cell.hitCount) / 20.0)
+        // Confidence from hit density; also require more evidence for dropoffs.
+        var confidence = min(1.0, Float(min(cell.hitCount, neighbor.hitCount)) / 25.0)
+        if type == .dropoff { confidence *= 0.7 }
+        if confidence < 0.35 { return nil }
         
         return ElevationChange(
             type: type,
             position: SIMD2<Float>(worldX, worldZ),
             distance: distance,
             angle: relAngle,
-            heightChange: diffDirection,
+            heightChange: heightChange,
             confidence: confidence
         )
     }

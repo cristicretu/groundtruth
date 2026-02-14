@@ -59,9 +59,9 @@ struct GridCell: Codable {
 
 // The occupancy grid - 2D top-down view of the world
 struct OccupancyGrid: Codable {
-    // Grid parameters
-    let cellSize: Float         // Meters per cell (e.g., 0.1 = 10cm)
-    let gridSize: Int           // Cells per side (e.g., 200 = 20m x 20m at 10cm)
+    // Grid parameters (from GridConfig)
+    let cellSize: Float         // Meters per cell
+    let gridSize: Int           // Cells per side
     
     // Grid data
     var cells: [[GridCell]]
@@ -83,8 +83,8 @@ struct OccupancyGrid: Codable {
     var obstacleCellCount: Int = 0
     var stepCellCount: Int = 0
     
-    // Initialize with size
-    init(cellSize: Float = 0.1, gridSize: Int = 200) {
+    // Initialize with size (defaults from GridConfig)
+    init(cellSize: Float = GridConfig.cellSize, gridSize: Int = GridConfig.gridSize) {
         self.cellSize = cellSize
         self.gridSize = gridSize
         self.cells = Array(
@@ -107,12 +107,12 @@ struct OccupancyGrid: Codable {
     
     // Convert world position to grid indices
     func worldToGrid(_ worldX: Float, _ worldZ: Float) -> (x: Int, z: Int)? {
-        let halfGrid = Float(gridSize) / 2.0
+        let halfGrid = GridConfig.halfGrid
         let relX = worldX - originX
         let relZ = worldZ - originZ
 
         // Stabilize BEV: rotate world into user-forward frame.
-        // After this, +Z is \"forward\" (heading-aligned), +X is \"right\".
+        // After this, +Z is "forward" (heading-aligned), +X is "right".
         let (rx, rz) = rotate2D(x: relX, z: relZ, by: -userHeading)
         
         let gridX = Int((rx / cellSize) + halfGrid)
@@ -128,7 +128,7 @@ struct OccupancyGrid: Codable {
     
     // Convert grid indices to world position (center of cell)
     func gridToWorld(_ gridX: Int, _ gridZ: Int) -> (x: Float, z: Float) {
-        let halfGrid = Float(gridSize) / 2.0
+        let halfGrid = GridConfig.halfGrid
         let localX = (Float(gridX) - halfGrid + 0.5) * cellSize
         let localZ = (Float(gridZ) - halfGrid + 0.5) * cellSize
 
@@ -201,8 +201,12 @@ final class OccupancyGridBuilder {
     private var grid: OccupancyGrid
     private let lock = NSLock()
     
-    init(cellSize: Float = 0.1, gridSize: Int = 200) {
+    // Reusable buffer for floor height calculation (avoid alloc per frame)
+    private var floorHeightBuffer: [Float] = []
+    
+    init(cellSize: Float = GridConfig.cellSize, gridSize: Int = GridConfig.gridSize) {
         grid = OccupancyGrid(cellSize: cellSize, gridSize: gridSize)
+        floorHeightBuffer.reserveCapacity(200)
     }
     
     // Build grid from ARKit mesh anchors
@@ -210,12 +214,12 @@ final class OccupancyGridBuilder {
         from anchors: [ARMeshAnchor],
         userPosition: simd_float3,
         userHeading: Float,
-        maxDistance: Float = 10.0
+        maxDistance: Float = GridConfig.maxDistance
     ) -> OccupancyGrid {
         lock.lock()
         defer { lock.unlock() }
         
-        // Reset and set origin
+        // Reset grid each frame (TODO: add decay for temporal filtering later)
         grid.clear()
         grid.originX = userPosition.x
         grid.originZ = userPosition.z
@@ -224,7 +228,7 @@ final class OccupancyGridBuilder {
         grid.userGridZ = grid.gridSize / 2
         
         // First pass: find floor height from classified floor vertices
-        var floorHeights: [Float] = []
+        floorHeightBuffer.removeAll(keepingCapacity: true)
         
         for anchor in anchors {
             let geometry = anchor.geometry
@@ -247,16 +251,16 @@ final class OccupancyGridBuilder {
                     let dx = worldV.x - userPosition.x
                     let dz = worldV.z - userPosition.z
                     if dx*dx + dz*dz < 4.0 { // Within 2m of user
-                        floorHeights.append(worldV.y)
+                        floorHeightBuffer.append(worldV.y)
                     }
                 }
             }
         }
         
         // Use median floor height
-        if floorHeights.count > 10 {
-            floorHeights.sort()
-            grid.floorHeight = floorHeights[floorHeights.count / 2]
+        if floorHeightBuffer.count > ProcessingConfig.minFloorSamples {
+            floorHeightBuffer.sort()
+            grid.floorHeight = floorHeightBuffer[floorHeightBuffer.count / 2]
         } else {
             grid.floorHeight = userPosition.y - 1.6 // Default: user height
         }
@@ -340,6 +344,7 @@ final class OccupancyGridBuilder {
         for x in 0..<grid.gridSize {
             for z in 0..<grid.gridSize {
                 var cell = grid.cells[x][z]
+                
                 // Require a floor estimate; otherwise we don't know if the space is walkable.
                 guard cell.isValid, cell.minHeight.isFinite else { continue }
                 

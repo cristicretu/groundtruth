@@ -12,7 +12,6 @@ final class DebugStream {
     // streaming state
     private var isConnected = false
     private var frameCount = 0
-    private let sendEveryNFrames = 3  // ~20fps streaming
     
     // callbacks
     var onConnected: (() -> Void)?
@@ -49,7 +48,7 @@ final class DebugStream {
     }
     
     // Connect directly to IP
-    func connect(to host: String, port: UInt16 = 8765) {
+    func connect(to host: String, port: UInt16 = StreamConfig.port) {
         let endpoint = NWEndpoint.hostPort(
             host: NWEndpoint.Host(host),
             port: NWEndpoint.Port(rawValue: port)!
@@ -110,9 +109,9 @@ final class DebugStream {
     ) {
         guard isConnected else { return }
         
-        // throttle
+        // throttle to ~20fps
         frameCount += 1
-        guard frameCount % sendEveryNFrames == 0 else { return }
+        guard frameCount % StreamConfig.sendEveryNFrames == 0 else { return }
         
         // build packet
         var packet = StreamPacket()
@@ -152,7 +151,7 @@ final class DebugStream {
         packet.stepCells = grid.stepCellCount
         
         // Elevation changes (most important ones)
-        packet.elevationChanges = Array(elevationChanges.prefix(10)).map { change in
+        packet.elevationChanges = Array(elevationChanges.prefix(StreamConfig.maxElevationChanges)).map { change in
             StreamElevationChange(
                 type: change.type.rawValue,
                 posX: change.position.x,
@@ -169,7 +168,7 @@ final class DebugStream {
             var length = UInt32(data.count).bigEndian
             let lengthData = Data(bytes: &length, count: 4)
             
-            let packetNum = frameCount / sendEveryNFrames
+            let packetNum = frameCount / StreamConfig.sendEveryNFrames
             if packetNum % 30 == 0 {
                 print("[Stream] packet #\(packetNum): \(data.count) bytes, valid:\(grid.validCellCount) obs:\(grid.obstacleCellCount) step:\(grid.stepCellCount)")
             }

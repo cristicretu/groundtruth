@@ -16,13 +16,14 @@ final class Sensors: NSObject {
     private var meshAnchors: [ARMeshAnchor] = []
     private let meshLock = NSLock()
 
-    // stats - use atomic for thread safety
-    private var _fps: Int = 0
-    private var _frameCount: Int = 0
-    var fps: Int { _fps }
-    var frameCount: Int { _frameCount }
-    
+    // FPS tracking - only for UI display, updated on main thread
+    private var _fpsInternal: Int = 0
+    private var _frameCountInternal: Int = 0
     private var lastFPSTime = CACurrentMediaTime()
+    
+    // Thread-safe FPS accessor - published on main thread
+    @MainActor private(set) var fps: Int = 0
+    @MainActor private(set) var frameCount: Int = 0
     private(set) var isRunning = false
     
     override init() {
@@ -75,8 +76,12 @@ final class Sensors: NSObject {
         print("[Sensors] stop() called")
         session.pause()
         isRunning = false
-        _fps = 0
-        _frameCount = 0
+        _fpsInternal = 0
+        _frameCountInternal = 0
+        Task { @MainActor in
+            self.fps = 0
+            self.frameCount = 0
+        }
         meshLock.lock()
         meshAnchors.removeAll()
         meshLock.unlock()
@@ -93,13 +98,23 @@ final class Sensors: NSObject {
 
 extension Sensors: ARSessionDelegate {
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
-        _frameCount += 1
+        _frameCountInternal += 1
         let now = CACurrentMediaTime()
         if now - lastFPSTime >= 1.0 {
-            _fps = _frameCount
-            _frameCount = 0
+            _fpsInternal = _frameCountInternal
+            _frameCountInternal = 0
             lastFPSTime = now
-            print("[Sensors] FPS: \(_fps), hasDepth: \(frame.sceneDepth != nil), meshes: \(meshAnchors.count)")
+            
+            // Update main-thread accessible values
+            let currentFps = _fpsInternal
+            let currentFrameCount = _frameCountInternal
+            let meshCount = meshAnchors.count
+            let hasDepth = frame.sceneDepth != nil
+            Task { @MainActor in
+                self.fps = currentFps
+                self.frameCount = currentFrameCount
+            }
+            print("[Sensors] FPS: \(currentFps), hasDepth: \(hasDepth), meshes: \(meshCount)")
         }
         
         // fire callback

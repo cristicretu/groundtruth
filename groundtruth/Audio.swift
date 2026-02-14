@@ -21,8 +21,6 @@ final class SpatialAudio {
     private var isRunning = false
     private var lastBeepTime: Double = 0
     private var lastElevationTime: Double = 0
-    private let minBeepInterval: Double = 0.15
-    private let minElevationInterval: Double = 0.5  // elevation warnings less frequent
     
     init() {
         setupAudioSession()
@@ -203,7 +201,7 @@ final class SpatialAudio {
         
         // Handle elevation warnings (higher priority)
         if let warning = elevationWarning, warning.distance < 3.0 {
-            if now - lastElevationTime >= minElevationInterval {
+            if now - lastElevationTime >= AudioConfig.elevationWarningInterval {
                 lastElevationTime = now
                 playElevationWarning(warning)
                 return  // Don't play obstacle beep if we just played elevation warning
@@ -216,15 +214,15 @@ final class SpatialAudio {
         // beep rate based on distance (closer = faster)
         let interval: Double
         if nearestObstacle < 0.5 {
-            interval = 0.12  // very fast - danger!
+            interval = AudioConfig.beepIntervalDanger
         } else if nearestObstacle < 1.0 {
-            interval = 0.2
+            interval = AudioConfig.beepIntervalClose
         } else if nearestObstacle < 2.0 {
-            interval = 0.35
+            interval = AudioConfig.beepIntervalCaution
         } else if nearestObstacle < 3.0 {
-            interval = 0.5
+            interval = AudioConfig.beepIntervalFar
         } else {
-            interval = 0.8
+            interval = AudioConfig.beepIntervalDistant
         }
         
         guard now - lastBeepTime >= interval else { return }
