@@ -226,6 +226,7 @@ final class NavigationEngine: ObservableObject {
     private var lastUserHeading: Float = 0
     private var smoothHeading: Float = 0
     private var isHeadingInitialized = false
+    private var lastFrameTime: TimeInterval = 0
     
     init() {
         print("[Engine] init")
@@ -356,11 +357,22 @@ final class NavigationEngine: ObservableObject {
         // Get mesh anchors
         let meshAnchors = sensors.getMeshAnchors()
         
+        // Compute delta time
+        let currentTime = frame.timestamp
+        let deltaTime: Float
+        if lastFrameTime > 0 {
+            deltaTime = Float(currentTime - lastFrameTime)
+        } else {
+            deltaTime = 1.0 / 60.0
+        }
+        lastFrameTime = currentTime
+
         // Build occupancy grid from mesh
         var grid = gridBuilder.build(
             from: meshAnchors,
             userPosition: userPosition,
-            userHeading: smoothHeading
+            userHeading: smoothHeading,
+            deltaTime: deltaTime
         )
         
         // Analyze for elevation changes
