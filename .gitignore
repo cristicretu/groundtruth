@@ -3,3 +3,5 @@
 scripts/*.mlpackage/
 scripts/*.pt
 scripts/__pycache__/
+scripts/.pycache/
+.pycache/

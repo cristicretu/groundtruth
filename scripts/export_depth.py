@@ -3,8 +3,10 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import coremltools as ct
 from transformers import AutoModelForDepthEstimation
+from contextlib import contextmanager
 
 MODEL_ID = "depth-anything/Depth-Anything-V2-Small-hf"
 INPUT_SIZE = (518, 518)
@@ -22,18 +24,45 @@ class DepthWrapper(nn.Module):
         return self.model(pixel_values).predicted_depth
 
 
-def main():
-    print(f"Loading {MODEL_ID}...")
-    model = AutoModelForDepthEstimation.from_pretrained(MODEL_ID)
-    wrapper = DepthWrapper(model)
-    wrapper.eval()
+@contextmanager
+def force_bicubic_to_bilinear():
+    """
+    CoreML PyTorch frontend does not support upsample_bicubic2d.
+    Patch torch interpolate at trace-time so bicubic ops become bilinear.
+    """
+    original_interpolate = F.interpolate
 
-    print("Tracing model...")
-    dummy = torch.randn(1, 3, *INPUT_SIZE)
-    traced = torch.jit.trace(wrapper, dummy)
+    def patched_interpolate(
+        input,
+        size=None,
+        scale_factor=None,
+        mode="nearest",
+        align_corners=None,
+        recompute_scale_factor=None,
+        antialias=False,
+    ):
+        if mode == "bicubic":
+            mode = "bilinear"
+        return original_interpolate(
+            input,
+            size=size,
+            scale_factor=scale_factor,
+            mode=mode,
+            align_corners=align_corners,
+            recompute_scale_factor=recompute_scale_factor,
+            antialias=antialias,
+        )
 
+    F.interpolate = patched_interpolate
+    try:
+        yield
+    finally:
+        F.interpolate = original_interpolate
+
+
+def convert_traced_model(traced):
     print("Converting to CoreML...")
-    mlmodel = ct.convert(
+    return ct.convert(
         traced,
         inputs=[
             ct.ImageType(
@@ -49,6 +78,27 @@ def main():
         ],
         minimum_deployment_target=ct.target.iOS16,
     )
+
+
+def main():
+    print(f"Loading {MODEL_ID}...")
+    model = AutoModelForDepthEstimation.from_pretrained(MODEL_ID)
+    wrapper = DepthWrapper(model)
+    wrapper.eval()
+
+    dummy = torch.randn(1, 3, *INPUT_SIZE)
+    print("Tracing model...")
+    traced = torch.jit.trace(wrapper, dummy)
+
+    try:
+        mlmodel = convert_traced_model(traced)
+    except NotImplementedError as error:
+        if "upsample_bicubic2d" not in str(error):
+            raise
+        print("CoreML does not support upsample_bicubic2d; retrying with bilinear fallback...")
+        with force_bicubic_to_bilinear():
+            traced = torch.jit.trace(wrapper, dummy)
+        mlmodel = convert_traced_model(traced)
 
     output_path = f"{OUTPUT_NAME}.mlpackage"
     mlmodel.save(output_path)
