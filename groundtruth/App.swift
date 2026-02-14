@@ -160,10 +160,10 @@ struct PathfinderView: View {
 
 // The navigation engine - camera-only pipeline
 final class NavigationEngine: ObservableObject {
-    // Pipeline modules — swap mocks for real implementations when ready
-    private var visionPipeline: any VisionProcessing = MockVisionPipeline()
-    private var sceneAnalyzer: any SceneAnalyzing = MockSceneAnalyzer()
-    private var planner: any NavigationPlanning = MockNavigationPlanner()
+    // Pipeline modules
+    private var visionPipeline: VisionPipeline?
+    private let sceneAnalyzer = SceneAnalyzer()
+    private let planner = NavigationPlanner()
 
     // Core systems
     private let sensors = Sensors()
@@ -191,6 +191,14 @@ final class NavigationEngine: ObservableObject {
 
     init() {
         print("[Engine] init")
+
+        // Load CoreML models
+        do {
+            visionPipeline = try VisionPipeline()
+            print("[Engine] VisionPipeline loaded")
+        } catch {
+            print("[Engine] VisionPipeline failed to load: \(error)")
+        }
 
         // wire up sensor callback
         sensors.onFrame = { [weak self] frame in
@@ -319,7 +327,12 @@ final class NavigationEngine: ObservableObject {
 
         // 1. Run vision models (depth + segmentation)
         let visionStart = CACurrentMediaTime()
-        let vision = visionPipeline.process(frame: pixelBuffer)
+        guard let vision = visionPipeline?.process(frame: pixelBuffer) else {
+            if frameProcessCount % 60 == 0 {
+                print("[Engine] frame \(frameProcessCount): no vision pipeline")
+            }
+            return
+        }
         let visionTime = (CACurrentMediaTime() - visionStart) * 1000 // ms
 
         // 2. Analyze scene (pure math, fast)
@@ -375,17 +388,22 @@ final class NavigationEngine: ObservableObject {
     private func updateAudio(from nav: NavigationOutput) {
         // Map discontinuity to ElevationChange for existing audio system
         let elevationWarning: ElevationChange?
-        if let disc = nav.discontinuityAhead, disc.distance < 3.0 {
-            // Small magnitude = step, large = curb/danger
-            let type: ElevationChangeType = disc.magnitude > 0.2 ? .curbDown : .stepDown
-            elevationWarning = ElevationChange(
-                type: type,
-                position: .zero,
-                distance: disc.distance,
-                angle: 0,
-                heightChange: -disc.magnitude,
-                confidence: 1.0
-            )
+        if let disc = nav.discontinuityAhead {
+            let estimatedDistance = planner.depthScale / (disc.relativeDepth + 0.001)
+            if estimatedDistance < 3.0 {
+                // Small magnitude = step, large = curb/danger
+                let type: ElevationChangeType = disc.magnitude > 0.2 ? .curbDown : .stepDown
+                elevationWarning = ElevationChange(
+                    type: type,
+                    position: .zero,
+                    distance: estimatedDistance,
+                    angle: 0,
+                    heightChange: -disc.magnitude,
+                    confidence: 1.0
+                )
+            } else {
+                elevationWarning = nil
+            }
         } else {
             elevationWarning = nil
         }

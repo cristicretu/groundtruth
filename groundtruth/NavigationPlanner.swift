@@ -31,13 +31,13 @@ struct SceneUnderstanding {
 // MARK: - Navigation Output
 
 struct NavigationOutput {
-    let suggestedHeading: Float
-    let clearance: Float
-    let nearestObstacleDistance: Float
-    let nearestObstacleBearing: Float
-    let discontinuityAhead: Discontinuity?
-    let groundConfidence: Float
-    let isPathBlocked: Bool
+    var suggestedHeading: Float = 0
+    var clearance: Float = .infinity
+    var nearestObstacleDistance: Float = .infinity
+    var nearestObstacleBearing: Float = 0
+    var discontinuityAhead: Discontinuity? = nil
+    var groundConfidence: Float = 1.0
+    var isPathBlocked: Bool = false
 }
 
 // MARK: - Navigation Planner

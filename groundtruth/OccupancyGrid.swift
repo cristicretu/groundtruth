@@ -2,6 +2,7 @@
 // Tesla-style occupancy grid - the foundation of scene understanding
 // "Don't ask what it is, ask if space is occupied"
 import simd
+import Foundation
 
 // Cell state - what we know about each grid cell
 enum CellState: UInt8, Codable {

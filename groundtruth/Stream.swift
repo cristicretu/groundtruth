@@ -152,7 +152,7 @@ final class DebugStream {
         packet.obstacleDistance = navigationOutput.nearestObstacleDistance
         if let disc = navigationOutput.discontinuityAhead {
             packet.discontinuityCount = 1
-            packet.nearestDiscontinuityDistance = disc.distance
+            packet.nearestDiscontinuityDistance = 10.0 / (disc.relativeDepth + 0.001)
         }
 
         // Detected objects (backward compat)

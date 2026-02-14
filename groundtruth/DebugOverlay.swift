@@ -45,11 +45,14 @@ struct DebugOverlayView: View {
             }
 
             // Discontinuity warning
-            if let disc = engine.navigationOutput.discontinuityAhead, disc.distance < 5 {
-                HStack {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundColor(disc.magnitude > 0.2 ? .red : .yellow)
-                    Text(String(format: "Surface change %.1fm ahead", disc.distance))
+            if let disc = engine.navigationOutput.discontinuityAhead {
+                let discDist = 10.0 / (Double(disc.relativeDepth) + 0.001)
+                if discDist < 5.0 {
+                    HStack {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(disc.magnitude > 0.2 ? .red : .yellow)
+                        Text(String(format: "Surface change %.1fm ahead", discDist))
+                    }
                 }
             }
 
