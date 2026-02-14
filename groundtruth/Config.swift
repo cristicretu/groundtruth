@@ -73,6 +73,14 @@ enum AudioConfig {
     static let elevationWarningInterval: Double = 0.5
 }
 
+// MARK: - Detection (YOLO)
+
+enum DetectionConfig {
+    static let minConfidence: Float = 0.4
+    static let cameraHFOV: Float = 2.094     // ~120° ultrawide
+    static let inferenceInterval: Int = 3     // Every 3rd frame (~20Hz)
+}
+
 // MARK: - Processing
 
 enum ProcessingConfig {

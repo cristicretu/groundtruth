@@ -210,6 +210,7 @@ final class NavigationEngine: ObservableObject {
     private let gridBuilder = OccupancyGridBuilder()  // Uses GridConfig defaults
     private let audio = SpatialAudio()
     private let debugStream = DebugStream()
+    private let detector = ObjectDetector()
     private let processingQueue = DispatchQueue(label: "processing", qos: .userInteractive)
     
     @Published private(set) var isRunning = false
@@ -390,6 +391,15 @@ final class NavigationEngine: ObservableObject {
                 if grid.cells[gx][gz].state != .occupied {
                     grid.cells[gx][gz].state = mapped
                 }
+            }
+        }
+
+        // Run YOLO detection every Nth frame
+        if frameProcessCount % DetectionConfig.inferenceInterval == 0 {
+            let detections = detector.detect(pixelBuffer: frame.capturedImage)
+            if !detections.isEmpty && frameProcessCount % 60 == 0 {
+                let summary = detections.prefix(3).map { "\($0.objectType.label)(\(String(format: "%.0f%%", $0.confidence * 100)))" }.joined(separator: ", ")
+                print("[Detector] \(detections.count) objects: \(summary) [\(String(format: "%.1f", detector.inferenceTimeMs))ms]")
             }
         }
 
