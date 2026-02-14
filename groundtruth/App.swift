@@ -386,7 +386,19 @@ final class NavigationEngine: ObservableObject {
         )
 
         // 6. Debug log periodically
-        if frameProcessCount % 60 == 0 {
+        if frameProcessCount % 30 == 0 {
+            var freeCells = 0, occupiedCells = 0, stepCells = 0
+            for x in 0..<grid.gridSize {
+                for z in 0..<grid.gridSize {
+                    switch grid.cells[x][z].state {
+                    case .free: freeCells += 1
+                    case .occupied: occupiedCells += 1
+                    case .step: stepCells += 1
+                    default: break
+                    }
+                }
+            }
+            print("[GRID] valid: \(grid.validCellCount), free: \(freeCells), occupied: \(occupiedCells), step: \(stepCells)")
             print("[Engine] frame \(frameProcessCount): obstacle=\(String(format: "%.2f", nav.nearestObstacleDistance))m ground=\(String(format: "%.0f%%", nav.groundConfidence * 100)) vision=\(String(format: "%.1f", visionTime))ms")
         }
 

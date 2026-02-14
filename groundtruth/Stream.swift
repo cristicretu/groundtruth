@@ -116,7 +116,7 @@ final class DebugStream {
         packet.timestamp = timestamp
         packet.userPosition = [userPosition.x, userPosition.y, userPosition.z]
         packet.userHeading = userHeading
-        packet.nearestObstacle = nearestObstacle
+        packet.nearestObstacle = nearestObstacle.isFinite ? nearestObstacle : 999
         packet.floorHeight = grid.floorHeight
 
         // Grid metadata
@@ -149,7 +149,8 @@ final class DebugStream {
         // Navigation output (new fields)
         packet.navigationHeading = navigationOutput.suggestedHeading
         packet.groundConfidence = navigationOutput.groundConfidence
-        packet.obstacleDistance = navigationOutput.nearestObstacleDistance
+        let navDist = navigationOutput.nearestObstacleDistance
+        packet.obstacleDistance = navDist.isFinite ? navDist : 999
         if let disc = navigationOutput.discontinuityAhead {
             packet.discontinuityCount = 1
             packet.nearestDiscontinuityDistance = 10.0 / (disc.relativeDepth + 0.001)
@@ -204,7 +205,7 @@ struct StreamPacket: Codable {
     var timestamp: Double = 0
     var userPosition: [Float] = [0, 0, 0]
     var userHeading: Float = 0
-    var nearestObstacle: Float = .infinity
+    var nearestObstacle: Float = 999
     var floorHeight: Float = 0
 
     // Grid metadata
