@@ -57,14 +57,6 @@ struct GridCell: Codable {
     }
 }
 
-// Types of detected objects (for future multi-source input)
-enum DetectedObjectType {
-    case person, vehicle, bicycle, dog
-    case pole, bollard, sign
-    case bench, trashcan, fireHydrant
-    case generic
-}
-
 // The occupancy grid - 2D top-down view of the world
 // Storage is WORLD-ALIGNED (no heading rotation). Heading rotation is applied at output time.
 struct OccupancyGrid: Codable {

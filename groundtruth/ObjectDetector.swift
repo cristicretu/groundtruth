@@ -4,6 +4,7 @@
 import CoreML
 import Vision
 import CoreVideo
+import QuartzCore
 
 final class ObjectDetector {
     private var model: VNCoreMLModel?
@@ -25,7 +26,6 @@ final class ObjectDetector {
             }
             let mlModel = try MLModel(contentsOf: modelURL, configuration: config)
             model = try VNCoreMLModel(for: mlModel)
-            model?.imageCropAndScaleOption = .scaleFill
             print("[Detector] model loaded successfully")
         } catch {
             print("[Detector] failed to load model: \(error)")
@@ -58,12 +58,6 @@ final class ObjectDetector {
         }
 
         return parseResults(results)
-    }
-
-    // MARK: - Async Detection
-
-    func detect(pixelBuffer: CVPixelBuffer) async -> [Detection] {
-        detect(pixelBuffer: pixelBuffer)
     }
 
     // MARK: - Result Parsing
